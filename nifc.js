@@ -251,6 +251,13 @@ class Emitter {
       const len = isAtom(size) ? size.atom : "0";
       return this.genType(t.kids[0]) + " " + name + "[" + len + "]";
     }
+    // A flexarray (UncheckedArray) as a *definition* (a global/const with an
+    // aggregate initializer, or a struct's trailing member) is a real C array
+    // `T name[]`, not a decayed pointer — so its initializer sizes it and a
+    // struct's last flexible member is laid out inline.
+    if (isList(t) && t.tag === "flexarray") {
+      return this.genType(t.kids[0]) + " " + name + "[]";
+    }
     if (isList(t) && t.tag === "proctype") {
       const params = t.kids.find((k) => isList(k) && k.tag === "params");
       const idx = params ? t.kids.indexOf(params) : -1;
@@ -295,8 +302,18 @@ class Emitter {
       case "neg": return "((" + this.genType(e.kids[0]) + ")-" + this.genExpr(e.kids[e.kids.length - 1]) + ")";
       case "bitnot": return "((" + this.genType(e.kids[0]) + ")~" + this.genExpr(e.kids[e.kids.length - 1]) + ")";
       case "not": return "(!" + this.genExpr(e.kids[e.kids.length - 1]) + ")";
-      case "cast": case "conv": case "hconv": case "baseobj":
+      case "cast": case "conv": case "hconv":
         return "((" + this.genType(e.kids[0]) + ")" + this.genExpr(e.kids[e.kids.length - 1]) + ")";
+      case "baseobj": {
+        // (baseobj BaseType level expr): reinterpret an object as its base
+        // sub-object `level` inheritance hops up — the base is the nested `.Q`
+        // member (same `.Q` convention as `dot`), NOT a C cast to a struct type.
+        const expr = this.genExpr(e.kids[e.kids.length - 1]);
+        let level = 1;
+        if (e.kids.length >= 3 && isAtom(e.kids[1]) && /^\d+$/.test(e.kids[1].atom))
+          level = parseInt(e.kids[1].atom, 10);
+        return "(" + expr + ".Q".repeat(level) + ")";
+      }
       case "call": case "hcall": case "onerr": {
         let start = 1;
         if (t === "onerr") start = 2;              // (onerr action fn args...)
@@ -341,17 +358,31 @@ class Emitter {
   }
   genConstr(e) {
     // (oconstr TYPE (kv field val)...) | (aconstr TYPE val...)
-    const ty = this.genType(e.kids[0]);
     if (e.tag === "aconstr") {
       const vals = e.kids.slice(1).map((x) => this.genExpr(x));
-      return "(" + ty + "){ .a = { " + vals.join(", ") + " } }";
+      // A *named* array type is struct-wrapped (`typedef struct { T a[N]; }`), so
+      // it needs the `.a` designator inside a compound literal. An *inline*
+      // array/flexarray type (e.g. an RTTI vtable's display/method table) decays
+      // to a pointer under genType, so emit a plain C aggregate initializer —
+      // correct as a global/const initializer or a nested array-member value.
+      if (isAtom(e.kids[0])) {
+        return "(" + this.genType(e.kids[0]) + "){ .a = { " + vals.join(", ") + " } }";
+      }
+      return "{ " + vals.join(", ") + " }";
     }
+    const ty = this.genType(e.kids[0]);
     const parts = [];
     for (const kv of e.kids.slice(1)) {
       if (isList(kv) && kv.tag === "kv") {
         const fld = kv.kids[0];
         const fname = isAtom(fld) ? mangleToC(fld.atom) : this.genExpr(fld);
-        parts.push("." + fname + " = " + this.genExpr(kv.kids[1]));
+        // A `kv` may carry an inheritance level as a third kid (same convention
+        // as `dot`): the field lives that many parents up, reached via `.Q`.
+        let inh = "";
+        if (kv.kids[2] && isAtom(kv.kids[2]) && /^\d+$/.test(kv.kids[2].atom)) {
+          inh = ".Q".repeat(parseInt(kv.kids[2].atom, 10));
+        }
+        parts.push(inh + "." + fname + " = " + this.genExpr(kv.kids[1]));
       } else {
         parts.push(this.genExpr(kv));
       }
