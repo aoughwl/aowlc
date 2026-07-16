@@ -685,6 +685,68 @@ typedef NI64 NI;      typedef NU64 NU;
 const STMT_TAGS = new Set(["asgn", "store", "call", "hcall", "if", "while", "loop",
   "case", "scope", "lab", "jmp", "discard", "onerr", "keepovf", "raise", "ret", "break"]);
 
+// Collect the named type atoms a type node references *by value* — i.e. the
+// types that must be complete where this node is used as a field/member.
+// Pointer indirections (ptr/aptr/flexarray) need only a forward declaration, so
+// they are NOT value dependencies; array element types ARE (they're embedded).
+function collectValueTypeAtoms(node, out) {
+  if (!node) return;
+  if (isAtom(node)) { if (!isDot(node)) out.add(node.atom); return; }
+  if (!isList(node)) return;
+  switch (node.tag) {
+    case "ptr": case "aptr": case "flexarray": return;   // pointer: forward decl suffices
+    case "array": collectValueTypeAtoms(node.kids[0], out); return;
+    default: return;                                       // scalars/proctype: no struct dep
+  }
+}
+
+// Order type declarations so a struct/union with a by-value member of another
+// declared type is emitted AFTER that type's full definition — C requires a
+// complete type for value members (the forward decls only satisfy pointers).
+// Stable: independent types keep source order; value-dependency cycles are
+// impossible in C (a struct can't contain itself by value), and any accidental
+// cycle degrades gracefully to source order rather than looping.
+function orderTypesByValueDeps(types, em) {
+  const byName = new Map();
+  for (const td of types) byName.set(td.kids[0].atom, td);
+  const valueDeps = (td) => {
+    const deps = new Set();
+    const pragmas = td.kids.find((k) => isList(k) && k.tag === "pragmas");
+    if (em.hasPragma(pragmas, ["nodecl", "importc", "importcpp", "header"])) return deps;
+    const body = td.kids[td.kids.length - 1];
+    if (isList(body)) {
+      if (body.tag === "object" || body.tag === "union") {
+        let start = 0;
+        if (body.kids.length && (isDot(body.kids[0]) || isAtom(body.kids[0]))) {
+          if (isAtom(body.kids[0]) && !isDot(body.kids[0])) deps.add(body.kids[0].atom); // embedded base
+          start = 1;
+        }
+        for (const f of body.kids.slice(start))
+          if (isList(f) && f.tag === "fld") collectValueTypeAtoms(f.kids[f.kids.length - 1], deps);
+      } else if (body.tag === "array") {
+        collectValueTypeAtoms(body.kids[0], deps);
+      }
+    } else if (isAtom(body) && !isDot(body)) {
+      deps.add(body.atom);   // typedef alias: keep the aliased type first
+    }
+    const local = new Set();
+    for (const d of deps) if (byName.has(d)) local.add(d);
+    return local;
+  };
+  const order = [], state = new Map();   // atom -> 0 visiting, 1 done
+  const visit = (td) => {
+    const nm = td.kids[0].atom;
+    const st = state.get(nm);
+    if (st !== undefined) return;         // done or on the current stack (cycle): stop
+    state.set(nm, 0);
+    for (const d of valueDeps(td)) { const dtd = byName.get(d); if (dtd && dtd !== td) visit(dtd); }
+    state.set(nm, 1);
+    order.push(td);
+  };
+  for (const td of types) visit(td);
+  return order;
+}
+
 function classify(nodes) {
   const root = nodes.find((n) => isList(n) && n.tag === "stmts");
   if (!root) throw new Error("nifc: no top-level (stmts …) found — is this a .c.nif?");
@@ -775,9 +837,10 @@ function compileModule(snif, opts = {}) {
     }
   }
 
-  // type declarations (skip nodecl/importc)
+  // type declarations (skip nodecl/importc), value-dependency ordered so a
+  // struct with a by-value field of another struct sees a complete type.
   const typeDecls = [];
-  for (const td of types) { const s = em.genTypeDecl(td); if (s) typeDecls.push(s); }
+  for (const td of orderTypesByValueDeps(types, em)) { const s = em.genTypeDecl(td); if (s) typeDecls.push(s); }
 
   // prototypes for all procs (order-independent calls)
   const protos = [];
@@ -868,7 +931,7 @@ function compileHarness(snif, entry, argExprs = []) {
   }
 
   const typeDecls = [];
-  for (const td of types) { const s = em.genTypeDecl(td); if (s) typeDecls.push(s); }
+  for (const td of orderTypesByValueDeps(types, em)) { const s = em.genTypeDecl(td); if (s) typeDecls.push(s); }
   const protos = [], defs = [];
   for (const nm of reached) {
     const p = procByName.get(nm);
