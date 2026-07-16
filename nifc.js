@@ -573,6 +573,13 @@ class Emitter {
   }
   genObjectDecl(nm, body, isUnion) {
     const kw = isUnion ? "typedef union " : "typedef struct ";
+    return kw + nm + " {\n" + this.genObjectFields(body) + "} " + nm + ";";
+  }
+  // Emit the members of an object/union body.  Handles the optional inheritance
+  // parent, plain `fld`s, and `case`-object variants: a `union` child becomes an
+  // anonymous C11 union whose branches are anonymous structs, so nimony's flat
+  // field access (`v.i_0`) and flat designated initializers still resolve.
+  genObjectFields(body) {
     let fields = "";
     let start = 0;
     // optional inheritance parent as first child (Symbol) or '.'
@@ -583,13 +590,21 @@ class Emitter {
       start = 1;
     }
     for (const f of body.kids.slice(start)) {
-      if (isList(f) && f.tag === "fld") {
+      if (!isList(f)) continue;
+      if (f.tag === "fld") {
         const fn = f.kids[0];
         const ftype = f.kids[f.kids.length - 1];
         fields += this.declare(ftype, mangleToC(fn.atom)) + ";\n";
+      } else if (f.tag === "union") {
+        fields += "union {\n";
+        for (const branch of f.kids) {
+          if (isList(branch) && branch.tag === "object")
+            fields += "struct {\n" + this.genObjectFields(branch) + "};\n";
+        }
+        fields += "};\n";
       }
     }
-    return kw + nm + " {\n" + fields + "} " + nm + ";";
+    return fields;
   }
   genEnumDecl(nm, body) {
     const base = body.kids[0];
@@ -696,6 +711,19 @@ function collectValueTypeAtoms(node, out) {
   switch (node.tag) {
     case "ptr": case "aptr": case "flexarray": return;   // pointer: forward decl suffices
     case "array": collectValueTypeAtoms(node.kids[0], out); return;
+    case "object": case "union": {                        // walk members (incl. case-variant unions)
+      let start = 0;
+      if (node.kids.length && (isDot(node.kids[0]) || isAtom(node.kids[0]))) {
+        if (isAtom(node.kids[0]) && !isDot(node.kids[0])) out.add(node.kids[0].atom); // embedded base
+        start = 1;
+      }
+      for (const f of node.kids.slice(start)) {
+        if (!isList(f)) continue;
+        if (f.tag === "fld") collectValueTypeAtoms(f.kids[f.kids.length - 1], out);
+        else if (f.tag === "union" || f.tag === "object") collectValueTypeAtoms(f, out);
+      }
+      return;
+    }
     default: return;                                       // scalars/proctype: no struct dep
   }
 }
@@ -713,22 +741,9 @@ function orderTypesByValueDeps(types, em) {
     const deps = new Set();
     const pragmas = td.kids.find((k) => isList(k) && k.tag === "pragmas");
     if (em.hasPragma(pragmas, ["nodecl", "importc", "importcpp", "header"])) return deps;
-    const body = td.kids[td.kids.length - 1];
-    if (isList(body)) {
-      if (body.tag === "object" || body.tag === "union") {
-        let start = 0;
-        if (body.kids.length && (isDot(body.kids[0]) || isAtom(body.kids[0]))) {
-          if (isAtom(body.kids[0]) && !isDot(body.kids[0])) deps.add(body.kids[0].atom); // embedded base
-          start = 1;
-        }
-        for (const f of body.kids.slice(start))
-          if (isList(f) && f.tag === "fld") collectValueTypeAtoms(f.kids[f.kids.length - 1], deps);
-      } else if (body.tag === "array") {
-        collectValueTypeAtoms(body.kids[0], deps);
-      }
-    } else if (isAtom(body) && !isDot(body)) {
-      deps.add(body.atom);   // typedef alias: keep the aliased type first
-    }
+    // collectValueTypeAtoms walks object/union/array bodies (recursing into
+    // case-variant unions) and typedef-alias atoms, skipping pointer members.
+    collectValueTypeAtoms(td.kids[td.kids.length - 1], deps);
     const local = new Set();
     for (const d of deps) if (byName.has(d)) local.add(d);
     return local;
