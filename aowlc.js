@@ -547,6 +547,7 @@ class Emitter {
     const args = pnodes.map((pp) => {
       const pn = pp.kids[0];
       const pt = paramType(pp);
+      if (isList(pt) && pt.tag === "varargs") return "...";   // C variadic tail
       return this.declare(pt, mangleToC(pn.atom));
     });
     let prefix = "";
@@ -893,6 +894,10 @@ function compileModule(snif, opts = {}) {
   const defs = [];
   for (const p of procs) {
     const parts = em.procParts(p);
+    // A proc backed by a C header (or explicitly nodecl) is declared by the
+    // `#include` we emit for that header — re-declaring it with our own NI/NU
+    // typedefs would clash with libc (e.g. `fprintf`'s real FILE*/varargs sig).
+    if (em.hasPragma(parts.pragmas, ["header", "nodecl"])) continue;
     const sig = em.procSignature(p);
     if (!parts.body) { protos.push(sig.sig + ";"); continue; }
     // Emit a prototype for every proc, inline included: a `static inline` proc
@@ -916,13 +921,34 @@ function compileModule(snif, opts = {}) {
   // globals + their deferred (non-literal) initialisers
   const data = [], inits = [];
   for (const g of globals) {
+    // An imported/nodecl global (a libc symbol or a predefined macro such as
+    // __ATOMIC_SEQ_CST) is provided externally — defining it here would clash.
+    if (em.hasPragma(g.kids[1], ["nodecl", "importc", "importcpp", "header"])) continue;
     const info = em.genGlobal(g);
     data.push(info.decl);
     if (info.needsInit) inits.push(em.symName(info.nameAtom) + " = " + em.genExpr(info.value) + ";");
   }
   for (const s of topStmts) { const c = em.genStmt(s); if (c) inits.push(c); }
 
+  // C headers pulled in by importc procs/globals/types → real `#include`s, so
+  // libc types/functions (FILE, fprintf, __ATOMIC_SEQ_CST …) come from the
+  // system headers rather than being re-declared with our typedefs.
+  const headers = new Set();
+  const addHeaders = (pragmas) => {
+    if (!isList(pragmas)) return;
+    for (const pr of pragmas.kids)
+      if (isList(pr) && pr.tag === "header" && pr.kids[0] && typeof pr.kids[0].str === "string")
+        headers.add(pr.kids[0].str);
+  };
+  for (const p of procs) addHeaders(em.procParts(p).pragmas);
+  for (const g of globals) addHeaders(g.kids[1]);
+  for (const td of types) addHeaders(td.kids.find((k) => isList(k) && k.tag === "pragmas"));
+
   let out = PRELUDE + "\n";
+  if (headers.size) {
+    out += "/* --- imported C headers --- */\n" +
+      [...headers].map((h) => "#include " + (h.startsWith("<") ? h : '"' + h + '"')).join("\n") + "\n\n";
+  }
   out += "/* --- error/overflow flags --- */\n_Thread_local NB8 LENGC_ERR_;\n_Thread_local NB8 LENGC_OVF_;\n\n";
   if (fwdDecls.length) out += "/* --- forward type declarations --- */\n" + fwdDecls.join("\n") + "\n\n";
   if (typeDecls.length) out += "/* --- types --- */\n" + typeDecls.join("\n") + "\n\n";

@@ -58,5 +58,29 @@ for (const file of MODULE_BUILDS) {
   else { console.log(`  FAIL module build+run ${file}: ${(r.stderr||"").trim()}`); fail++; }
 }
 
+// Whole real nimony `system` module: emit C and require it to compile clean.
+// This is the runtime-provider path — the actual lib/std/system/* sources
+// (strings/seqs/ARC/alloc/dynlib/panics) through nimony's frontend+hexer, then
+// aowlc → C. It exercises importc + C headers + varargs, and guards against a
+// regression in that whole class. Skipped (not failed) if no C compiler.
+{
+  const fs = require("fs");
+  const sys = path.join(EX, "system.c.nif");
+  const CC = process.env.CC || "gcc";
+  const haveCC = cp.spawnSync(CC, ["--version"], { encoding: "utf8" }).status === 0;
+  if (!haveCC || !fs.existsSync(sys)) {
+    console.log(`  skip system.c.nif emit+compile (no ${CC} or fixture)`);
+  } else {
+    const em = cp.spawnSync("node", [AOWLC, "emit", sys], { encoding: "utf8" });
+    if (em.status !== 0) { console.log(`  FAIL system.c.nif emit: ${(em.stderr||"").trim()}`); fail++; }
+    else {
+      const gcc = cp.spawnSync(CC, ["-std=c11", "-fsyntax-only", "-w", "-xc", "-"],
+        { input: em.stdout, encoding: "utf8" });
+      if (gcc.status === 0) { console.log("  ok   system.c.nif emit + compile (real system module)"); pass++; }
+      else { console.log(`  FAIL system.c.nif compile:\n${(gcc.stderr||"").split("\n").slice(0,6).join("\n")}`); fail++; }
+    }
+  }
+}
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);
