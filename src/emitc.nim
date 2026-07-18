@@ -5,7 +5,7 @@
 ## an in-memory node tree. So this port first builds an AST (`Node`) from the
 ## streaming `Cursor`, then ports aowlc.js's logic directly against that AST.
 when defined(nimony): {.feature: "lenientnils".}
-import std/[syncio]
+import std/[syncio, os]
 import nifcursors, nifstreams, nimony_model
 import programs
 
@@ -49,6 +49,18 @@ typedef NI64 NI;      typedef NU64 NU;
 #  pragma GCC diagnostic ignored "-Wunused-label"
 #  pragma GCC diagnostic ignored "-Wunused-variable"
 #  pragma GCC diagnostic ignored "-Wunused-function"
+#  pragma GCC diagnostic ignored "-Wformat"
+#  pragma GCC diagnostic ignored "-Wdiscarded-qualifiers"
+#  pragma GCC diagnostic ignored "-Wint-conversion"
+#  pragma GCC diagnostic ignored "-Wincompatible-pointer-types"
+#  pragma GCC diagnostic ignored "-Wbuiltin-declaration-mismatch"
+#  pragma GCC diagnostic ignored "-Wimplicit-function-declaration"
+#  pragma GCC diagnostic ignored "-Wmain"
+#  pragma GCC diagnostic ignored "-Wreturn-type"
+#  pragma GCC diagnostic ignored "-Wparentheses"
+#  pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#  pragma GCC diagnostic ignored "-Wmissing-braces"
+#  pragma GCC diagnostic ignored "-Wattributes"
 #endif
 """
 
@@ -370,12 +382,35 @@ var typeExternKeys: seq[string] = @[]
 var typeExternVals: seq[string] = @[]
 var noDeclTypes: seq[string] = @[]
 
+# cross-module resolution state: sibling `.c.nif` modules loaded on demand so we
+# can emit correct `extern` prototypes / type declarations for foreign symbols.
+var ownMod: string = ""
+var loadedMods: seq[string] = @[]
+var siblingSuffixes: seq[string] = @[]      # module basenames present in the dir
+var siblingSuffixesLoaded = false
+var modProcKeys: seq[string] = @[]
+var modProcVals: seq[Node] = @[]
+var modGlobalKeys: seq[string] = @[]
+var modGlobalVals: seq[Node] = @[]
+var modTypeKeys: seq[string] = @[]
+var modTypeVals: seq[Node] = @[]
+
 proc resetEmitter() =
   externKeys = @[]
   externVals = @[]
   typeExternKeys = @[]
   typeExternVals = @[]
   noDeclTypes = @[]
+  ownMod = prog.main.name
+  loadedMods = @[]
+  siblingSuffixes = @[]
+  siblingSuffixesLoaded = false
+  modProcKeys = @[]
+  modProcVals = @[]
+  modGlobalKeys = @[]
+  modGlobalVals = @[]
+  modTypeKeys = @[]
+  modTypeVals = @[]
 
 proc mapHas(keys: seq[string]; k: string): bool =
   for x in keys:
@@ -422,6 +457,10 @@ proc genExpr(e: Node): string
 proc genType(t: Node): string
 proc genStmt(s: Node): string
 proc genConstr(e: Node): string
+proc buildNode(c: var Cursor): Node
+proc procSignature(p: Node): string
+proc genTypeDecl(td: Node): string
+proc declare(t: Node; name: string): string
 
 proc findTag(n: Node; tag: string): Node =
   if not isList(n): return nil
@@ -972,10 +1011,12 @@ proc genTypeDecl(td: Node): string =
 # No-header importc runtime symbols backed by libc (mimalloc allocator), so a
 # linked program is self-contained. Faithful to aowlc.js RUNTIME_PROVISIONS.
 proc provisionImpl(name: string): string =
-  if name == "mi_malloc": return "void* mi_malloc(NU n) { return malloc((size_t)n); }"
-  elif name == "mi_free": return "void mi_free(void* p) { free(p); }"
-  elif name == "mi_realloc": return "void* mi_realloc(void* p, NU n) { return realloc(p, (size_t)n); }"
-  elif name == "mi_usable_size": return "NU mi_usable_size(void* p) { return (NU)malloc_usable_size(p); }"
+  # `static`: each module that imports one of these runtime symbols emits its own
+  # libc-backed definition, so give them internal linkage to avoid clashes at link.
+  if name == "mi_malloc": return "static void* mi_malloc(NU n) { return malloc((size_t)n); }"
+  elif name == "mi_free": return "static void mi_free(void* p) { free(p); }"
+  elif name == "mi_realloc": return "static void* mi_realloc(void* p, NU n) { return realloc(p, (size_t)n); }"
+  elif name == "mi_usable_size": return "static NU mi_usable_size(void* p) { return (NU)malloc_usable_size(p); }"
   return ""
 
 proc provisionNeeds(name: string): string =
@@ -1139,6 +1180,83 @@ proc orderTypesByValueDeps(types: seq[Node]): seq[Node] =
   for td in types: otVisit(td)
   return otOrder
 
+# ---------------------------------------------------------------------------
+# cross-module symbol resolution
+# ---------------------------------------------------------------------------
+proc lastComponent(s: string): string =
+  var i = s.len - 1
+  while i >= 0 and s[i] != '.': dec i
+  if i < 0: return ""          # no dot at all → not a qualified symbol
+  return s[i + 1 ..< s.len]
+
+# returns the owning module suffix if `atom` is a symbol defined in a sibling
+# module (its trailing dotted component names a sibling `.c.nif`), else "".
+# Results are cached: `siblingSuffixes` = known-good, `checkedSuffixes` = probed.
+var checkedSuffixes: seq[string] = @[]
+proc foreignModuleOf(atom: string): string =
+  let lc = lastComponent(atom)
+  if lc.len == 0: return ""
+  if lc == ownMod: return ""
+  if mapHas(siblingSuffixes, lc): return lc
+  if mapHas(checkedSuffixes, lc): return ""
+  checkedSuffixes.add lc
+  let dir = if prog.main.dir.len > 0: prog.main.dir else: "."
+  if fileExists(dir & "/" & lc & ".c.nif"):
+    siblingSuffixes.add lc
+    return lc
+  return ""
+
+proc loadSiblingModule(suffix: string) =
+  if mapHas(loadedMods, suffix): return
+  loadedMods.add suffix
+  let dir = if prog.main.dir.len > 0: prog.main.dir else: "."
+  let path = dir & "/" & suffix & ".c.nif"
+  if not fileExists(path): return
+  var buf = parseFromFile(path)
+  var cur = beginRead(buf)
+  let tree = buildNode(cur)
+  endRead buf
+  if not isList(tree): return
+  for d in tree.kids:
+    if not isList(d): continue
+    if d.tag == "proc" or d.tag == "func":
+      if d.kids.len > 0 and isAtom(d.kids[0]):
+        modProcKeys.add d.kids[0].atom
+        modProcVals.add d
+    elif oneOf(d.tag, ["gvar", "tvar", "glet", "var", "let", "const"]):
+      if d.kids.len > 0 and isAtom(d.kids[0]):
+        modGlobalKeys.add d.kids[0].atom
+        modGlobalVals.add d
+    elif d.tag == "type":
+      if d.kids.len > 0 and isAtom(d.kids[0]):
+        modTypeKeys.add d.kids[0].atom
+        modTypeVals.add d
+
+proc modFindProc(atom: string): Node =
+  for i in 0 ..< modProcKeys.len:
+    if modProcKeys[i] == atom: return modProcVals[i]
+  return nil
+
+proc modFindGlobal(atom: string): Node =
+  for i in 0 ..< modGlobalKeys.len:
+    if modGlobalKeys[i] == atom: return modGlobalVals[i]
+  return nil
+
+proc modFindType(atom: string): Node =
+  for i in 0 ..< modTypeKeys.len:
+    if modTypeKeys[i] == atom: return modTypeVals[i]
+  return nil
+
+# Recursively collect every atom in `n` that names a foreign-module symbol.
+proc collectForeignAtoms(n: Node; outp: var seq[string]) =
+  if n == nil: return
+  if isAtom(n):
+    if foreignModuleOf(n.atom).len > 0 and not mapHas(outp, n.atom): outp.add n.atom
+    return
+  if isList(n):
+    # field names in a `dot`/`kv` are member accesses, not linkable symbols
+    for k in n.kids: collectForeignAtoms(k, outp)
+
 proc indentC(src: string): string =
   let lines = splitLinesNl(src)
   var depth = 0
@@ -1177,9 +1295,57 @@ proc emitUnit(parts: Classified): string =
     let nm = g.kids[0].atom
     if not mapHas(definedSyms, nm): definedSyms.add nm
 
+  # ---- cross-module resolution -------------------------------------------
+  # Collect every foreign-module symbol this module references, load the
+  # defining sibling `.c.nif`, and materialise `extern` prototypes / type
+  # declarations for them. A fixpoint is required because a foreign proc's
+  # signature (or a foreign struct's fields) may pull in further foreign types.
+  var foreignProcs: seq[Node] = @[]
+  var foreignGlobals: seq[Node] = @[]
+  var foreignTypes: seq[Node] = @[]
+  var seenForeign: seq[string] = @[]
+  var pending: seq[string] = @[]
+  for p in procs: collectForeignAtoms(p, pending)
+  for g in globals: collectForeignAtoms(g, pending)
+  for td in types: collectForeignAtoms(td, pending)
+  for s in topStmts: collectForeignAtoms(s, pending)
+  var qi = 0
+  while qi < pending.len:
+    let atom = pending[qi]
+    inc qi
+    if mapHas(seenForeign, atom): continue
+    seenForeign.add atom
+    let m = foreignModuleOf(atom)
+    if m.len == 0: continue
+    loadSiblingModule(m)
+    let pn = modFindProc(atom)
+    if pn != nil:
+      foreignProcs.add pn
+      collectForeignAtoms(pn, pending)   # its signature may reference more
+      continue
+    let gn = modFindGlobal(atom)
+    if gn != nil:
+      foreignGlobals.add gn
+      collectForeignAtoms(gn, pending)
+      continue
+    let tn = modFindType(atom)
+    if tn != nil:
+      foreignTypes.add tn
+      collectForeignAtoms(tn, pending)
+      continue
+    # else: a member/field name or an unresolved symbol — ignored.
+
+  # foreign importc names must be registered too, so typeName/symName map right.
+  buildExternMaps(foreignProcs, foreignGlobals, foreignTypes)
+
+  # all types needing a declaration in this TU: foreign first (deps), then local.
+  var allTypes: seq[Node] = @[]
+  for td in foreignTypes: allTypes.add td
+  for td in types: allTypes.add td
+
   # forward declarations for object/union structs
   var fwdDecls: seq[string] = @[]
-  for td in types:
+  for td in allTypes:
     let pragmas = findTag(td, "pragmas")
     if hasPragma(pragmas, ["nodecl", "importc", "importcpp", "header"]): continue
     let body = td.kids[td.kids.len - 1]
@@ -1188,9 +1354,9 @@ proc emitUnit(parts: Classified): string =
       let kw = if body.tag == "union": "union " else: "struct "
       fwdDecls.add "typedef " & kw & nm & " " & nm & ";"
 
-  # type declarations (value-dependency ordered)
+  # type declarations (value-dependency ordered), foreign + local together
   var typeDecls: seq[string] = @[]
-  let ordered = orderTypesByValueDeps(types)
+  let ordered = orderTypesByValueDeps(allTypes)
   for td in ordered:
     let s = genTypeDecl(td)
     if s.len > 0: typeDecls.add s
@@ -1206,8 +1372,11 @@ proc emitUnit(parts: Classified): string =
       var ext = externName(pp.pragmas)
       if ext.len == 0: ext = beforeDot(pp.nameAtom.atom)
       if ext.len >= 2 and ext[0] == '_' and ext[1] == '_': continue
+      if isProvision(ext):
+        # emitted as a `static` libc-backed impl before any use; no proto needed.
+        if not mapHas(provisionsNeeded, ext): provisionsNeeded.add ext
+        continue
       protos.add procSignature(p) & ";"
-      if isProvision(ext) and not mapHas(provisionsNeeded, ext): provisionsNeeded.add ext
       continue
     let sig = procSignature(p)
     if pp.body == nil:
@@ -1216,14 +1385,35 @@ proc emitUnit(parts: Classified): string =
     protos.add sig & ";"
     defs.add genProc(p)
 
-  # weak stubs for unresolved external calls
-  var calledSyms: seq[string] = @[]
-  for p in procs: collectCalls(procParts(p).body, calledSyms)
-  for s in topStmts: collectCalls(s, calledSyms)
-  var stubs: seq[string] = @[]
-  for c in calledSyms:
-    if not mapHas(definedSyms, c):
-      stubs.add "NI64 " & symName(c) & "() { return 0; }"
+  # extern prototypes / globals for foreign-module symbols (real cross-module
+  # linkage — the defining module emits the definition, we just declare it).
+  var stubs: seq[string] = @[]          # foreign prototypes + extern globals
+  var foreignDefs: seq[string] = @[]    # foreign `static inline` definitions
+  for pn in foreignProcs:
+    let pp = procParts(pn)
+    if hasPragma(pp.pragmas, ["header", "nodecl"]): continue
+    if hasPragma(pp.pragmas, ["importc", "importcpp"]):
+      var ext = externName(pp.pragmas)
+      if ext.len == 0: ext = beforeDot(pp.nameAtom.atom)
+      if ext.len >= 2 and ext[0] == '_' and ext[1] == '_': continue
+      if isProvision(ext):
+        if not mapHas(provisionsNeeded, ext): provisionsNeeded.add ext
+        continue
+      stubs.add procSignature(pn) & ";"
+      continue
+    # `static inline` procs have internal linkage: each TU that uses one must
+    # carry its own full definition. Emit a prototype up-front (so calls from
+    # other inline bodies resolve regardless of order) plus the full body.
+    if hasPragma(pp.pragmas, ["inline"]) and pp.body != nil:
+      stubs.add procSignature(pn) & ";"
+      foreignDefs.add genProc(pn)
+      continue
+    stubs.add "extern " & procSignature(pn) & ";"
+  for gn in foreignGlobals:
+    if hasPragma(gn.kids[1], ["nodecl", "header"]): continue
+    if hasPragma(gn.kids[1], ["importc", "importcpp"]): continue
+    let nm = declName(gn.kids[0].atom, gn.kids[1])
+    stubs.add "extern " & declare(gn.kids[2], nm) & ";"
 
   # globals + deferred initializers
   var data: seq[string] = @[]
@@ -1243,6 +1433,9 @@ proc emitUnit(parts: Classified): string =
   for p in procs: addHeaders(procParts(p).pragmas, headers)
   for g in globals: addHeaders(g.kids[1], headers)
   for td in types: addHeaders(findTag(td, "pragmas"), headers)
+  for p in foreignProcs: addHeaders(procParts(p).pragmas, headers)
+  for g in foreignGlobals: addHeaders(g.kids[1], headers)
+  for td in foreignTypes: addHeaders(findTag(td, "pragmas"), headers)
 
   # libc-backed implementations for no-header importc runtime symbols; their
   # header needs are folded into the #include set.
@@ -1259,7 +1452,7 @@ proc emitUnit(parts: Classified): string =
       if h.len > 0 and h[0] == '<': hs.add "#include " & h
       else: hs.add "#include \"" & h & "\""
     outp.add "/* --- imported C headers --- */\n" & joinSeq(hs, "\n") & "\n\n"
-  outp.add "/* --- error/overflow flags --- */\n_Thread_local NB8 LENGC_ERR_;\n_Thread_local NB8 LENGC_OVF_;\n\n"
+  outp.add "/* --- error/overflow flags --- */\nstatic _Thread_local NB8 LENGC_ERR_;\nstatic _Thread_local NB8 LENGC_OVF_;\n\n"
   if fwdDecls.len > 0:
     outp.add "/* --- forward type declarations --- */\n" & joinSeq(fwdDecls, "\n") & "\n\n"
   if typeDecls.len > 0:
@@ -1267,7 +1460,9 @@ proc emitUnit(parts: Classified): string =
   if protos.len > 0:
     outp.add "/* --- prototypes --- */\n" & joinSeq(protos, "\n") & "\n\n"
   if stubs.len > 0:
-    outp.add "/* --- external stubs --- */\n" & joinSeq(stubs, "\n") & "\n\n"
+    outp.add "/* --- cross-module declarations --- */\n" & joinSeq(stubs, "\n") & "\n\n"
+  if foreignDefs.len > 0:
+    outp.add "/* --- cross-module inline definitions --- */\n" & joinSeq(foreignDefs, "\n\n") & "\n\n"
   if provisions.len > 0:
     outp.add "/* --- runtime provisions (no-header importc) --- */\n" & joinSeq(provisions, "\n") & "\n\n"
   if data.len > 0:
@@ -1286,17 +1481,13 @@ proc emitUnit(parts: Classified): string =
 # (`fib.1.fib`). The oracle reads the RAW on-disk form, so strip the suffix the
 # loader appended to recover it — matching mangleToC's input byte-for-byte.
 proc stripModuleSuffix(s: string): string =
-  let ms = prog.main.name
-  if ms.len == 0: return s
-  if s.len <= ms.len: return s
-  # s must end with `ms`, preceded by a `.` (the empty-hash separator)
-  var k = s.len - ms.len
-  var i = 0
-  while i < ms.len:
-    if s[k + i] != ms[i]: return s
-    inc i
-  if s[k - 1] != '.': return s
-  return s[0 ..< k]
+  ## Nimony's real mangling KEEPS the module suffix: the loader (nifreader)
+  ## expands an own-module symbol's empty trailing hash slot (`ini.0.`) to the
+  ## module basename (`ini.0.fibdncrrv`), which is exactly what nimony's own C
+  ## backend emits. Stripping it made a symbol's definition (`X60Qini_0_`)
+  ## disagree with cross-module uses (`X60Qini_0_fibdncrrv`) and collide across
+  ## modules, so we keep the fully-qualified name verbatim.
+  result = s
 
 proc buildNode(c: var Cursor): Node =
   case c.kind
