@@ -123,7 +123,9 @@ function main() {
     const files = o._;
     if (!files.length) fail("link needs one or more .c.nif files");
     const mods = files.map((f) => ({ src: readSrc(f), hash: baseName(f) }));
-    const c = aowlc.compileProgram(mods, { stubExterns: !o.noStubs });
+    // A whole-program link should have no undefined externs; stubbing them to
+    // `return 0` would hide real missing symbols. Default OFF; opt in with --stubs.
+    const c = aowlc.compileProgram(mods, { stubExterns: o.stubs === true });
     if (o.emitC) process.stdout.write(c + "\n");
     const tmpDir = process.env.AOWLC_TMP || fs.mkdtempSync(path.join(os.tmpdir(), "aowlc-"));
     const cFile = o.keep && o.out ? o.out.replace(/(\.[^.]*)?$/, ".c") : path.join(tmpDir, "program.c");
