@@ -36,6 +36,7 @@ function parseArgs(argv) {
     else if (a === "-S" || a === "--emit-c") o.emitC = true;
     else if (a === "--no-stubs") o.noStubs = true;
     else if (a === "--single") o.single = true;
+    else if (a === "--emit-only") o.emitOnly = true;
     else if (a === "--stubs") o.stubs = true;
     else o._.push(a);
   }
@@ -173,6 +174,13 @@ function main() {
     // `return 0` would hide real missing symbols. Default OFF; opt in with --stubs.
     const c = aowlc.compileProgram(mods, { stubExterns: o.stubs === true });
     if (o.emitC) process.stdout.write(c + "\n");
+    if (o.emitOnly) {
+      // Whole-program C, no cc step: the caller compiles it itself (e.g. aowli's
+      // JIT, which wants `-shared -fPIC` plus an appended wrapper).
+      if (o.out) { fs.writeFileSync(o.out, c); console.error("aowlc: wrote " + o.out); }
+      else process.stdout.write(c);
+      return;
+    }
     const tmpDir = process.env.AOWLC_TMP || fs.mkdtempSync(path.join(os.tmpdir(), "aowlc-"));
     const cFile = o.keep && o.out ? o.out.replace(/(\.[^.]*)?$/, ".c") : path.join(tmpDir, "program.c");
     fs.writeFileSync(cFile, c);
