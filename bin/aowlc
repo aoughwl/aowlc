@@ -35,6 +35,8 @@ function parseArgs(argv) {
     else if (a === "--keep") o.keep = true;
     else if (a === "-S" || a === "--emit-c") o.emitC = true;
     else if (a === "--no-stubs") o.noStubs = true;
+    else if (a === "--single") o.single = true;
+    else if (a === "--stubs") o.stubs = true;
     else o._.push(a);
   }
   return o;
@@ -77,6 +79,39 @@ function toC(src, opts) {
   return aowlc.compileModule(src, { stubExterns: !opts.noStubs });
 }
 
+// The other modules of the SAME program. nimony puts every module of a program
+// in ONE nimcache directory named after the main module, so a module's siblings
+// are simply the other .c.nif files next to it. The entry module is placed LAST
+// (it is the one carrying `main`). Returns [] when there is nothing to add.
+function programModules(file) {
+  const self = path.resolve(file);
+  const modDir = path.dirname(self);
+  let names;
+  try { names = fs.readdirSync(modDir); } catch (e) { return []; }
+  const others = [];
+  for (const n of names) {
+    if (!n.endsWith(".c.nif")) continue;
+    const f = path.join(modDir, n);
+    if (path.resolve(f) !== self) others.push(f);
+  }
+  if (!others.length) return [];
+  others.push(self);
+  return others;
+}
+
+// Whole-program C: this module plus every sibling module, in ONE translation
+// unit. Single-module C cannot work for any module that uses an imported TYPE
+// (`echo` alone pulls in `LongString_…` from system): an extern stub can stand
+// in for a missing function, but nothing can stand in for a missing type, so
+// gcc dies on "unknown type name". That is why `build`/`run` used to fail on
+// every program that touched stdout while `exec --entry` was fine.
+function programC(file, opts) {
+  const mods = programModules(file);
+  if (!mods.length) return null;
+  const parts = mods.map((f) => ({ src: readSrc(f), hash: baseName(f) }));
+  return { c: aowlc.compileProgram(parts, { stubExterns: false }), n: mods.length };
+}
+
 function main() {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
@@ -100,7 +135,18 @@ function main() {
     const file = o._[0];
     if (cmd === "exec" && !o.entry) fail("exec needs --entry NAME");
     const src = readSrc(file);
-    const c = toC(src, o);
+    // `build`/`run` mean "make this PROGRAM run", so default to linking the
+    // whole module set. `exec --entry` stays a single-module harness, and
+    // `--single` opts back out.
+    let c = null;
+    if (!o.entry && !o.single) {
+      const prog = programC(file, o);
+      if (prog) {
+        c = prog.c;
+        console.error("aowlc: linking " + prog.n + " modules (--single for this module alone)");
+      }
+    }
+    if (c === null) c = toC(src, o);
     if (o.emitC) process.stdout.write(c + "\n");
 
     const tmpDir = process.env.AOWLC_TMP || fs.mkdtempSync(path.join(os.tmpdir(), "aowlc-"));
