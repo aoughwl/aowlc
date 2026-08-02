@@ -71,6 +71,31 @@ node bin/aowlc build examples/compute.c.nif -o /tmp/compute
 node bin/aowlc exec examples/fib.c.nif --entry fib --arg 10        # -> 55
 node bin/aowlc exec examples/compute.c.nif --entry gcd --arg 48 --arg 36   # -> 12
 node bin/aowlc exec examples/mathf.c.nif --entry classify --arg 15         # -> 300
+
+# just the linked C, no cc step (what aowli's mid-run JIT consumes)
+node bin/aowlc link <nimcache>/<main>/*.c.nif --emit-only -o /tmp/program.c
+```
+
+### `build`/`run` are whole-PROGRAM
+
+`build` and `run` link the module together with its siblings — nimony puts every
+module of a program in one nimcache directory, so they are the `.c.nif` files
+next to the one you named. `--single` opts back out to one translation unit.
+
+This matters more than it sounds: a single TU cannot work for any module that
+uses an imported **type**. An extern stub can stand in for a missing function,
+but nothing can stand in for a missing type, so a lone module that merely called
+`echo` died in gcc with `unknown type name 'LongString_0_<system>'`. `exec
+--entry` was unaffected, which made it look like a whole-module *emission* bug
+rather than a missing link step.
+
+## Tests
+
+```sh
+bash test/e2e.sh examples/hello.nim     # emit EVERY module, gcc-link, diff vs nimony
+bash test/driver.sh examples/hello.nim  # the DRIVER (build + exec), not the raw printer
+bash test/single.sh examples/hello.nim  # one TU alone vs all modules — separates a
+                                        # codegen bug from a whole-module-emission one
 ```
 
 `exec` mode emits only the procs (and globals) transitively reachable from the
