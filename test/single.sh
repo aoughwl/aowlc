@@ -8,6 +8,14 @@
 #     'LongString_0_…' — which only shows up when the TU is compiled by itself)
 #
 #   bash test/single.sh <prog.nim>
+#
+# EXIT STATUS. This stays a DIAGNOSTIC — it deliberately runs BOTH compiles and
+# prints both verdicts rather than aborting at the first one, because which of the
+# two fails is the whole point. But the verdict is also in the exit status now, so
+# the script is usable in a `&&` chain or a sweep:
+#   0  every stage that ran was OK
+#   1  a stage FAILED (SOLO-COMPILE FAIL / ALL-COMPILE FAIL)
+#   2  setup failed — no .c.nif located, or the printer emitted nothing
 set -uo pipefail
 src="$1"; name=$(basename "$src" .nim)
 AOWLC="${AOWLC:-$HOME/aowlc/bin/aowlc-native}"
@@ -36,16 +44,17 @@ fi
 if [ -z "$own" ]; then
   echo "could not locate $name's own .c.nif; nimcache holds:"
   find "$nc" -name '*.c.nif' | sed 's/^/   /' | head -20
-  exit 1
+  exit 2
 fi
 echo "own module: $(basename "$own")"
+rc=0
 
 mkdir -p "$out/solo"        # keep own.c OUT of the all-modules dir, else the
                             # link sees the same module twice (bogus
                             # "multiple definition of main")
 "$AOWLC" "$own" > "$out/solo/own.c" 2>"$out/emit.err"
 if [ ! -s "$out/solo/own.c" ]; then
-  echo "EMIT-FAIL: $(head -3 "$out/emit.err")"; exit 1
+  echo "EMIT-FAIL: $(head -3 "$out/emit.err")"; exit 2
 fi
 echo "emitted $(wc -l < "$out/solo/own.c") lines of C"
 
@@ -55,6 +64,7 @@ if gcc -c "$out/solo/own.c" -o "$out/solo/own.o" 2>"$out/gcc.err"; then
 else
   echo "SOLO-COMPILE FAIL:"
   head -12 "$out/gcc.err" | sed 's/^/   /'
+  rc=1
 fi
 
 echo "--- compiling ALL modules together (what e2e.sh does) ---"
@@ -68,5 +78,7 @@ if gcc "$out"/*.c -o "$out/$name" -lm 2>"$out/gccall.err"; then
 else
   echo "ALL-COMPILE FAIL ($n modules):"
   head -12 "$out/gccall.err" | sed 's/^/   /'
+  rc=1
 fi
 echo "artifacts: $out"
+exit "$rc"

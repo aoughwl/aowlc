@@ -145,6 +145,22 @@ proc toOctal(n: int): string =
     result = d & result
     v = v div 8
 
+proc toOctal3(n: int): string =
+  ## Octal escape padded to EXACTLY three digits, which is what a STRING literal
+  ## requires. A C octal escape absorbs up to three octal digits and stops early
+  ## only at a non-octal character, so a variable-width escape merges with a
+  ## following digit:
+  ##
+  ##   Nim "a\n7b"  ->  "a\127b"   is ONE char 0x57 'W', then 'b'
+  ##                    "a\0127b"  is 10, '7', 'b'                 (correct)
+  ##
+  ## Three digits is always enough and never too many here: every value escaped
+  ## this way is a single BYTE (0..0xFF -> 0..0377). nimony's own backend emits
+  ## the padded form, so this also removes a divergence from the reference C.
+  var o = toOctal(n)
+  while o.len < 3: o = "0" & o
+  result = o
+
 # ---------------------------------------------------------------------------
 # literal detection / rendering (faithful to aowlc.js regexes)
 # ---------------------------------------------------------------------------
@@ -315,7 +331,7 @@ proc makeCString(s: string): string =
     let code = ord(ch)
     if (code >= 0 and code <= 0x1F) or code >= 0x7F:
       result.add "\\"
-      result.add toOctal(code)
+      result.add toOctal3(code)
     elif ch == '\'' or ch == '"' or ch == '\\' or ch == '?':
       result.add "\\"
       result.add ch
