@@ -697,7 +697,25 @@ proc genExpr(e: Node): string =
   elif t == "not":
     return "(!" & genExpr(e.kids[e.kids.len - 1]) & ")"
   elif t == "cast" or t == "conv" or t == "hconv":
-    return "((" & genType(e.kids[0]) & ")" & genExpr(e.kids[e.kids.len - 1]) & ")"
+    let target = genType(e.kids[0])
+    let operand = e.kids[e.kids.len - 1]
+    # A conversion whose operand is a CONSTRUCTOR OF THE SAME TYPE is a no-op in
+    # C — and emitting it anyway is not merely noise, it changes the grammar of
+    # the result. `(T){…}` is a compound literal, which gcc accepts as the
+    # initializer of a file-scope object; `(T)(T){…}` is a CAST EXPRESSION, which
+    # is not a constant expression, so gcc rejects it with
+    #   error: initializer element is not constant
+    # The same code inside a proc compiles either way, which is why this stayed
+    # invisible: every existing fixture converted at LOCAL scope.
+    #
+    # Found while extending aowllib: `type Name = distinct string` plus a
+    # top-level `var n = Name("…")` lowers to (conv string (oconstr string …)),
+    # and the whole translation unit failed to compile.
+    if (t == "conv" or t == "hconv") and isList(operand) and
+       (operand.tag == "oconstr" or operand.tag == "aconstr") and
+       operand.kids.len > 0 and genType(operand.kids[0]) == target:
+      return genExpr(operand)
+    return "((" & target & ")" & genExpr(operand) & ")"
   elif t == "baseobj":
     let expr = genExpr(e.kids[e.kids.len - 1])
     var level = 1
