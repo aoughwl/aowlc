@@ -4,7 +4,11 @@
 #   test/e2e.sh <prog.nim>
 set -uo pipefail
 src="$1"; name=$(basename "$src" .nim)
-AOWLC="$HOME/aowlc/bin/aowlc-native"
+# Overridable, like driver.sh and single.sh already are: with the path hardcoded
+# to $HOME/aowlc a git WORKTREE cannot gate its own build — it silently measured
+# the main checkout's binary, which on this machine was stale enough to be missing
+# a change already in master's source.
+AOWLC="${AOWLC:-$HOME/aowlc/bin/aowlc-native}"
 ref=$(~/nimony/bin/nimony c -r "$src" 2>/dev/null | tr -d '\r')      # reference output
 nc=$(mktemp -d); ~/nimony/bin/nimony c --nimcache:"$nc" "$src" >/dev/null 2>&1
 out=$(mktemp -d); n=0

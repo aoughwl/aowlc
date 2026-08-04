@@ -457,6 +457,7 @@ proc genExpr(e: Node): string
 proc genType(t: Node): string
 proc genStmt(s: Node): string
 proc genConstr(e: Node): string
+proc genInit(e: Node): string
 proc buildNode(c: var Cursor): Node
 proc procSignature(p: Node): string
 proc genTypeDecl(td: Node): string
@@ -558,17 +559,21 @@ proc declare(t: Node; name: string): string =
 # ---------------------------------------------------------------------------
 # expressions
 # ---------------------------------------------------------------------------
-proc genConstr(e: Node): string =
+proc constrBody(e: Node): string =
+  ## The BRACED part of a constructor — `{ … }` — with no type cast in front and
+  ## with every nested constructor rendered the same way (via `genInit`).
+  ##
+  ## Shared by the two things C spells differently. See `genInit` for why the
+  ## difference is not cosmetic.
   if e.tag == "aconstr":
     var vals: seq[string] = @[]
     var i = 1
     while i < e.kids.len:
-      vals.add genExpr(e.kids[i])
+      vals.add genInit(e.kids[i])
       inc i
     if isAtom(e.kids[0]):
-      return "(" & genType(e.kids[0]) & "){ .a = { " & joinSeq(vals, ", ") & " } }"
+      return "{ .a = { " & joinSeq(vals, ", ") & " } }"
     return "{ " & joinSeq(vals, ", ") & " }"
-  let ty = genType(e.kids[0])
   var parts: seq[string] = @[]
   var i = 1
   while i < e.kids.len:
@@ -579,11 +584,46 @@ proc genConstr(e: Node): string =
       var inh = ""
       if kv.kids.len > 2 and isAtom(kv.kids[2]) and isIntLit(kv.kids[2].atom):
         inh = myRepeat(".Q", parseI64(kv.kids[2].atom).int)
-      parts.add inh & "." & fname & " = " & genExpr(kv.kids[1])
+      parts.add inh & "." & fname & " = " & genInit(kv.kids[1])
     else:
-      parts.add genExpr(kv)
+      parts.add genInit(kv)
     inc i
-  return "(" & ty & "){ " & joinSeq(parts, ", ") & " }"
+  return "{ " & joinSeq(parts, ", ") & " }"
+
+proc genConstr(e: Node): string =
+  ## Constructor in EXPRESSION position: a C compound literal, `(T){ … }`. This
+  ## is the right form for `x = (T){…};` or passing an aggregate to a call, and
+  ## it is what an assignment needs — a bare `{ … }` is not an expression in C.
+  if e.tag == "aconstr" and not isAtom(e.kids[0]):
+    return constrBody(e)          # inline array type: no name to cast to
+  return "(" & genType(e.kids[0]) & ")" & constrBody(e)
+
+proc genInit(e: Node): string =
+  ## Constructor in INITIALIZER position: `T x = { … };` — NO compound literal.
+  ##
+  ## These are two different C grammars, not two spellings of one. A compound
+  ## literal is NOT a constant expression (C11 6.6), and the initializer of an
+  ## object with static storage duration MUST be one, so
+  ##
+  ##     static const T x = (T){ .a = { … } };
+  ##
+  ## is rejected outright: `error: initializer element is not constant`. The
+  ## initializer form is accepted in exactly the same place.
+  ##
+  ## Found through nimony's system module: `computePow10` holds a `static const`
+  ## table of 1300-odd 128-bit mantissas, so EVERY program that formats a float —
+  ## anything that `echo`es one — emitted C that gcc refused. Nothing reported it
+  ## as a float bug: the whole translation unit failed, and in aowli's mid-run JIT
+  ## (which consumes this printer in-process) the failure surfaced only as the JIT
+  ## silently declining to compile ANY proc, which cost one wrong capability-map
+  ## run before it was traced back here.
+  ##
+  ## Recursive on purpose: gcc rejects a nested compound literal in a static
+  ## initializer for the same reason as the outer one, and the pow10 table's
+  ## elements are themselves `uint64x2` constructors.
+  if e != nil and isList(e) and (e.tag == "aconstr" or e.tag == "oconstr"):
+    return constrBody(e)
+  return genExpr(e)
 
 proc genExpr(e: Node): string =
   if e == nil: return ""
@@ -713,7 +753,10 @@ proc genLocalVar(s: Node): string =
   let hasInit = value != nil and not isDot(value)
   var decl = if typ != nil: declare(typ, nm) else: "NI " & nm
   if isConst: decl = "static const " & decl
-  return decl & (if hasInit: " = " & genExpr(value) else: "") & ";"
+  # INITIALIZER position, so genInit, not genExpr — a local `const` is emitted
+  # `static const`, and a static object's initializer must be a constant
+  # expression, which a compound literal is not. See genInit.
+  return decl & (if hasInit: " = " & genInit(value) else: "") & ";"
 
 proc genIf(s: Node): string =
   var outp = ""
@@ -933,7 +976,9 @@ proc genGlobal(g: Node): GlobalInfo =
   let hasInit = value != nil and not isDot(value) and isLiteralNode(value)
   result = default(GlobalInfo)
   result.name = nm
-  result.decl = decl & (if hasInit: " = " & genExpr(value) else: "") & ";"
+  # INITIALIZER position (see genInit): a file-scope object's initializer must be
+  # a constant expression whether or not it is `const`.
+  result.decl = decl & (if hasInit: " = " & genInit(value) else: "") & ";"
   result.nameAtom = nameAtom.atom
   result.needsInit = value != nil and not isDot(value) and not hasInit
   result.value = value
