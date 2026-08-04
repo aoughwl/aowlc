@@ -356,21 +356,19 @@ class Emitter {
       default: throw new Error("aowlc: unsupported expr '" + t + "'");
     }
   }
-  genConstr(e) {
-    // (oconstr TYPE (kv field val)...) | (aconstr TYPE val...)
+  constrBody(e) {
+    // The BRACED part of a constructor, `{ … }`, with no cast in front and every
+    // nested constructor rendered the same way (via genInit). Shared by the two
+    // things C spells differently — see genInit.
     if (e.tag === "aconstr") {
-      const vals = e.kids.slice(1).map((x) => this.genExpr(x));
+      const vals = e.kids.slice(1).map((x) => this.genInit(x));
       // A *named* array type is struct-wrapped (`typedef struct { T a[N]; }`), so
-      // it needs the `.a` designator inside a compound literal. An *inline*
-      // array/flexarray type (e.g. an RTTI vtable's display/method table) decays
-      // to a pointer under genType, so emit a plain C aggregate initializer —
-      // correct as a global/const initializer or a nested array-member value.
-      if (isAtom(e.kids[0])) {
-        return "(" + this.genType(e.kids[0]) + "){ .a = { " + vals.join(", ") + " } }";
-      }
+      // it needs the `.a` designator. An *inline* array/flexarray type (e.g. an
+      // RTTI vtable's display/method table) decays to a pointer under genType, so
+      // its values are a plain aggregate initializer with no designator.
+      if (isAtom(e.kids[0])) return "{ .a = { " + vals.join(", ") + " } }";
       return "{ " + vals.join(", ") + " }";
     }
-    const ty = this.genType(e.kids[0]);
     const parts = [];
     for (const kv of e.kids.slice(1)) {
       if (isList(kv) && kv.tag === "kv") {
@@ -382,12 +380,38 @@ class Emitter {
         if (kv.kids[2] && isAtom(kv.kids[2]) && /^\d+$/.test(kv.kids[2].atom)) {
           inh = ".Q".repeat(parseInt(kv.kids[2].atom, 10));
         }
-        parts.push(inh + "." + fname + " = " + this.genExpr(kv.kids[1]));
+        parts.push(inh + "." + fname + " = " + this.genInit(kv.kids[1]));
       } else {
-        parts.push(this.genExpr(kv));
+        parts.push(this.genInit(kv));
       }
     }
-    return "(" + ty + "){ " + parts.join(", ") + " }";
+    return "{ " + parts.join(", ") + " }";
+  }
+  genConstr(e) {
+    // (oconstr TYPE (kv field val)...) | (aconstr TYPE val...)
+    // EXPRESSION position: a C compound literal. Required for `x = (T){…};` and
+    // for passing an aggregate to a call — a bare `{ … }` is not an expression.
+    if (e.tag === "aconstr" && !isAtom(e.kids[0])) return this.constrBody(e);
+    return "(" + this.genType(e.kids[0]) + ")" + this.constrBody(e);
+  }
+  genInit(e) {
+    // INITIALIZER position: `T x = { … };` — never a compound literal.
+    //
+    // A compound literal is not a constant expression (C11 6.6) and the
+    // initializer of an object with static storage duration must be one, so
+    //     static const T x = (T){ .a = { … } };
+    // is rejected: `error: initializer element is not constant`. nimony's own C
+    // backend prints the initializer form for the same declarations.
+    //
+    // Found through system's `computePow10`, whose proc-local `const` table of
+    // 128-bit mantissas is reached by any program that formats a float: one
+    // rejected declaration fails the whole translation unit. src/emitc.nim (the
+    // nimony printer) carried the identical defect and is fixed the same way —
+    // this file is the one aowli's mid-run JIT reaches through `aowlc link`.
+    if (e !== undefined && isList(e) && (e.tag === "aconstr" || e.tag === "oconstr")) {
+      return this.constrBody(e);
+    }
+    return this.genExpr(e);
   }
 
   // --- statements -----------------------------------------------------------
@@ -509,7 +533,9 @@ class Emitter {
     const hasInit = value !== undefined && !isDot(value);
     let decl = type ? this.declare(type, nm) : "NI " + nm;
     if (isConst) decl = "static const " + decl;
-    return decl + (hasInit ? " = " + this.genExpr(value) : "") + ";";
+    // INITIALIZER position (genInit): a local `const` is emitted `static const`,
+    // and a static object's initializer must be a constant expression.
+    return decl + (hasInit ? " = " + this.genInit(value) : "") + ";";
   }
   declName(name, pragmas) {
     const ext = this.externName(pragmas);
@@ -570,7 +596,8 @@ class Emitter {
     let decl = this.declare(type, nm);
     if (isConst) decl = "static const " + decl;
     const hasInit = value !== undefined && !isDot(value) && isLiteralNode(value);
-    return { name: nm, decl: decl + (hasInit ? " = " + this.genExpr(value) : "") + ";",
+    // INITIALIZER position (genInit), same rule at file scope.
+    return { name: nm, decl: decl + (hasInit ? " = " + this.genInit(value) : "") + ";",
              nameAtom: nameAtom.atom, needsInit: value !== undefined && !isDot(value) && !hasInit,
              value };
   }
