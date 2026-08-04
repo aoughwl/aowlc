@@ -990,7 +990,11 @@ proc genGlobal(g: Node): GlobalInfo =
   let nm = declName(nameAtom.atom, pragmas)
   let isConst = g.tag == "const"
   var decl = declare(typ, nm)
-  if isConst: decl = "static const " & decl
+  # Module-level consts get EXTERNAL linkage (plain `const`, not `static const`):
+  # nimony emits strlit/vtable consts once per owning module and references them
+  # cross-module via `extern`. `static` here would hide the definition and break
+  # the extern reference at link time (empty/broken binary).
+  if isConst: decl = "const " & decl
   let hasInit = value != nil and not isDot(value) and isLiteralNode(value)
   result = default(GlobalInfo)
   result.name = nm

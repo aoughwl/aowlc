@@ -78,12 +78,30 @@ if [ ! -s "$WORK/system.c" ]; then
 fi
 
 # 1. THE FIXTURE IS ACTUALLY EXERCISED. Without this every assertion below is
-#    vacuously true the day the fixture stops containing a static aggregate.
-nstatic=$(grep -c '^\s*static const .* = {' "$WORK/system.c")
+#    vacuously true the day the fixture stops containing a const aggregate.
+#
+#    ⚠️ `static` IS OPTIONAL HERE, AND DELIBERATELY SO. This used to require the
+#    literal `static const`, which made it an assertion about LINKAGE — something
+#    this gate is not about (its scope line says: constructor emission in
+#    initializer vs expression position). genGlobal now gives a module-level const
+#    EXTERNAL linkage, and it has to: nimony emits each strlit/vtable const once in
+#    its owning module and references it cross-module by `extern`, so `static`
+#    hides the definition. Measured on aowli's JIT units, the same four .c files
+#    either way:
+#
+#      const        -> nm -u: no undefined strlit;  dlopen ok
+#      static const -> nm -u: strlit_0_I14694606176902936784_shanfvkib1 undefined
+#                             dlopen FAILED: undefined symbol
+#
+#    and `gcc -shared` LINKS BOTH SILENTLY — the static build only fails when the
+#    JIT actually dlopens it. So the linkage is load-bearing and untestable from
+#    here; what belongs here is only "is there a const aggregate initializer to
+#    reason about at all", which is what this now asks.
+nstatic=$(grep -cE '^\s*(static )?const .* = \{' "$WORK/system.c")
 if [ "$nstatic" -gt 0 ]; then
-  ok "the fixture emits $nstatic static-const aggregate initializer(s)"
+  ok "the fixture emits $nstatic const aggregate initializer(s) (static or not — linkage is not this gate's subject)"
 else
-  bad "the fixture emits a static-const aggregate" "none found — this gate would prove nothing"
+  bad "the fixture emits a const aggregate" "none found — this gate would prove nothing"
 fi
 
 # 2. NO compound literal in initializer position, at any nesting depth.
