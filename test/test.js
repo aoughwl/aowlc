@@ -32,7 +32,18 @@ const CASES = [
   ["mathf.c.nif",   "absf",     ["-3.5"],   "3.5"],
 ];
 
-// whole-module builds that must compile + link + run (exit 0)
+// whole-module builds that must compile + link + run (exit 0).
+//
+// `--single` is REQUIRED here and is not a weakening. Since "build/run link the
+// whole program, not one module", `build`/`run` default to linking every sibling
+// .c.nif, on the assumption that the input sits in a nimcache directory where the
+// siblings ARE the rest of the program. examples/ is not that: it is seven
+// UNRELATED single-module programs in one flat directory, four of which define
+// `main`, so the default path emits one TU with four `main`s and gcc rejects it.
+// What these cases mean is "the module's OWN code compiles+links+runs as a whole
+// module (not an exec --entry harness)", which is exactly `--single`. Real
+// whole-PROGRAM linking is covered below by prog_echo / prog_seqsum, which have
+// their own directories.
 const MODULE_BUILDS = ["fib.c.nif", "compute.c.nif", "mathf.c.nif"];
 
 function run(file, entry, args) {
@@ -53,7 +64,7 @@ for (const [file, entry, args, want] of CASES) {
   } catch (e) { console.log(`  FAIL ${label} => ${e.message}`); fail++; }
 }
 for (const file of MODULE_BUILDS) {
-  const r = cp.spawnSync("node", [AOWLC, "run", path.join(EX, file)], { encoding: "utf8" });
+  const r = cp.spawnSync("node", [AOWLC, "run", path.join(EX, file), "--single"], { encoding: "utf8" });
   if (r.status === 0) { console.log(`  ok   module build+run ${file}`); pass++; }
   else { console.log(`  FAIL module build+run ${file}: ${(r.stderr||"").trim()}`); fail++; }
 }
