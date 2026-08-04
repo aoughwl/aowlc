@@ -46,14 +46,15 @@ LOCAL="$ROOT/examples/localconst.c.nif"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-PLAN=8
+PLAN=10
 pass=0; fail=0
 ok()  { printf 'ok    %s\n' "$1"; pass=$((pass+1)); }
 bad() { printf 'FAIL  %s\n      %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
 
 echo "aowlc gate: static-initializer form"
 echo "  scope   : the C PRINTER (src/emitc.nim) only — constructor emission in"
-echo "            initializer vs expression position. Not the driver, not linking."
+echo "            initializer vs expression position, plus which non-standard C"
+echo "            constructs remain. Not the driver, not linking."
 echo "  printer : $AOWLC"
 echo "  fixture : $(basename "$SYS") + $(basename "$LOCAL") (shipped; no nimony run needed)"
 echo "  asserts : $PLAN declared"
@@ -176,6 +177,41 @@ if gcc -c "$WORK/localconst.c" -o "$WORK/localconst.o" 2>"$WORK/localconst.gcc";
 else
   bad "gcc compiles a translation unit with a proc-local const aggregate" \
       "$(grep -m1 error "$WORK/localconst.gcc" | cut -c1-160)"
+fi
+
+# 9 + 10. WHAT NON-STANDARD C IS LEFT, AND IS IT OURS.
+#
+#    The compound-literal bug was non-standard C that worked by GNU extension
+#    until it did not. The honest follow-up is not "is the output standard" — it
+#    is not — but "does aowlc introduce any non-standard construct that nimony's
+#    OWN backend does not". Measured on nimony's C for the same program: it emits
+#    the identical flexible-array-member initializer for string literals and
+#    fails -pedantic-errors identically (7 diagnostics, same construct). The
+#    LongString payload is a flexible array member by the compiler's own layout,
+#    so a printer cannot initialize it any other way without DIVERGING from the
+#    reference backend, which is the property e2e.sh exists to protect.
+#
+#    So: the FAM initializations are accepted by decision and pinned here, and any
+#    OTHER class of non-standard C is a regression.
+gcc -std=c11 -pedantic-errors -c "$WORK/system.c" -o /dev/null 2>"$WORK/ped.err"
+kinds=$(grep -o 'error: [a-z ]*' "$WORK/ped.err" | sort -u)
+nkinds=$(printf '%s' "$kinds" | grep -c . || true)
+if [ "$nkinds" -le 1 ] && printf '%s' "$kinds" | grep -q 'flexible array member'; then
+  ok "the only non-standard construct left is the FAM initializer (nimony's own backend emits it too)"
+elif [ "$nkinds" -eq 0 ]; then
+  bad "the FAM initializer is still present and pinned" \
+      "-pedantic-errors is now CLEAN, so this assertion no longer measures anything — retire it or tighten the gate to -pedantic-errors"
+else
+  bad "no NEW class of non-standard C" "$(printf '%s' "$kinds" | tr '\n' '|')"
+fi
+
+nfam=$(grep -c 'flexible array member' "$WORK/ped.err" || true)
+ndata=$(grep -c 'data_0' "$WORK/ped.err" || true)
+if [ "$nfam" -gt 0 ] && [ "$ndata" -ge "$nfam" ]; then
+  ok "every FAM diagnostic names the LongString payload ($nfam of them), not some new struct"
+else
+  bad "every FAM diagnostic names the LongString payload" \
+      "$nfam FAM diagnostic(s), $ndata mentioning data_0 — a different type grew a flexible array member"
 fi
 
 echo

@@ -394,6 +394,7 @@ var modGlobalKeys: seq[string] = @[]
 var modGlobalVals: seq[Node] = @[]
 var modTypeKeys: seq[string] = @[]
 var modTypeVals: seq[Node] = @[]
+var checkedSuffixes: seq[string] = @[]   # suffixes already PROBED on disk
 
 proc resetEmitter() =
   externKeys = @[]
@@ -411,6 +412,23 @@ proc resetEmitter() =
   modGlobalVals = @[]
   modTypeKeys = @[]
   modTypeVals = @[]
+  # THE ONE THAT WAS MISSING. `checkedSuffixes` is a "we already probed this
+  # suffix on disk" cache and `siblingSuffixes` is the positive result. Clearing
+  # only the positive one turns the probe cache into a PERMANENT NEGATIVE: on the
+  # second emitModuleBody call in a process, `foreignModuleOf` finds the suffix in
+  # checkedSuffixes, returns "" before it ever looks at the disk, and the module
+  # is emitted with NO cross-module type or prototype declarations at all.
+  #
+  # It never showed up in the CLI, which emits one module per process. It broke
+  # every multi-module caller — which is exactly one caller: aowli's mid-run JIT,
+  # whose in-process emit route has therefore never once succeeded on a program
+  # with more than one module. Its symptom there was
+  # `unknown type name 'ErrorCode_0_…'`, and the JIT quietly fell back to
+  # shelling out to `aowlc link`, so the fast path looked like it worked.
+  #
+  # The declaration used to sit 800 lines below, next to its only reader, which is
+  # why it was not in this list: an ordering accident, not a decision.
+  checkedSuffixes = @[]
 
 proc mapHas(keys: seq[string]; k: string): bool =
   for x in keys:
@@ -1237,7 +1255,8 @@ proc lastComponent(s: string): string =
 # returns the owning module suffix if `atom` is a symbol defined in a sibling
 # module (its trailing dotted component names a sibling `.c.nif`), else "".
 # Results are cached: `siblingSuffixes` = known-good, `checkedSuffixes` = probed.
-var checkedSuffixes: seq[string] = @[]
+# BOTH are per-emit state and BOTH are cleared by resetEmitter — see the note
+# there for what it cost when only one of them was.
 proc foreignModuleOf(atom: string): string =
   let lc = lastComponent(atom)
   if lc.len == 0: return ""
@@ -1331,6 +1350,38 @@ proc emitUnit(parts: Classified): string =
   let topStmts = parts.topStmts
 
   buildExternMaps(procs, globals, types)
+
+  # WHOSE MODULE IS THIS? `resetEmitter` seeds `ownMod` from `prog.main.name`,
+  # which is the PROGRAM's main module — correct only when the process emits that
+  # one module, which is the CLI's single-file case and nothing else. A
+  # multi-call consumer (aowli's JIT) emits every module of the program in one
+  # process, so from the second call on, `ownMod` names some OTHER module: the
+  # module's own symbols then look FOREIGN, get an `extern` declaration from the
+  # cross-module path AND a `static` definition from the local one, and gcc says
+  #
+  #   error: conflicting type qualifiers for 'strlit_0_I…_system'
+  #
+  # Derive it from the unit itself instead. Every symbol a module defines carries
+  # that module's suffix as its last dotted component, so the first defined symbol
+  # answers the question and no caller has to be told anything.
+  block:
+    var found = ""
+    for p in procs:
+      let a = procParts(p).nameAtom
+      if isAtom(a):
+        let lc = lastComponent(a.atom)
+        if lc.len > 0: found = lc; break
+    if found.len == 0:
+      for g in globals:
+        if g.kids.len > 0 and isAtom(g.kids[0]):
+          let lc = lastComponent(g.kids[0].atom)
+          if lc.len > 0: found = lc; break
+    if found.len == 0:
+      for td in types:
+        if td.kids.len > 0 and isAtom(td.kids[0]):
+          let lc = lastComponent(td.kids[0].atom)
+          if lc.len > 0: found = lc; break
+    if found.len > 0: ownMod = found
 
   var definedSyms: seq[string] = @[]
   for p in procs:
