@@ -1557,12 +1557,26 @@ proc emitUnit(parts: Classified): string =
     outp.add "/* --- prototypes --- */\n" & joinSeq(protos, "\n") & "\n\n"
   if stubs.len > 0:
     outp.add "/* --- cross-module declarations --- */\n" & joinSeq(stubs, "\n") & "\n\n"
-  if foreignDefs.len > 0:
-    outp.add "/* --- cross-module inline definitions --- */\n" & joinSeq(foreignDefs, "\n\n") & "\n\n"
   if provisions.len > 0:
     outp.add "/* --- runtime provisions (no-header importc) --- */\n" & joinSeq(provisions, "\n") & "\n\n"
+  # GLOBALS BEFORE THE CROSS-MODULE INLINE BODIES, not after. A `static inline`
+  # proc from another module is COPIED into this TU whole (it has internal
+  # linkage, so every user must carry its own definition), and its body can
+  # reference one of THIS module's globals — a string literal is the common case:
+  # `openarrays.at`'s bounds panic names `strlit_0_I…`, whose `(const …)` lives in
+  # the c.nif of whichever module instantiated it. Emitting those bodies first
+  # meant the reference came before the definition and gcc rejected the unit with
+  #
+  #   error: 'strlit_0_I14694606176902936784_shanfvkib1' undeclared
+  #
+  # The reverse dependency cannot occur: a global's initializer is a constant
+  # expression (genGlobal defers everything else to `inits`), so it can never call
+  # an inline body. Found through aowli's in-process JIT route, which is the only
+  # consumer that emits a whole program as separate self-contained units.
   if data.len > 0:
     outp.add "/* --- globals --- */\n" & joinSeq(data, "\n") & "\n\n"
+  if foreignDefs.len > 0:
+    outp.add "/* --- cross-module inline definitions --- */\n" & joinSeq(foreignDefs, "\n\n") & "\n\n"
   if defs.len > 0:
     outp.add "/* --- procedures --- */\n" & joinSeq(defs, "\n\n") & "\n\n"
   if inits.len > 0:
