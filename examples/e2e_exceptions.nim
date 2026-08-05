@@ -1,48 +1,29 @@
 import std/syncio
+
+# Nimony exception surface (heap ref-exception form).
+#  - a proc that can raise must carry a `.raises` pragma; `.raises: T` names the
+#    raised type (bare `.raises` defaults to the ErrorCode enum).
+#  - `raise T(msg: ..., field: ...)` constructs and raises a `ref object of Exception`.
+#  - `try / except T as e / except:` catches; `e` is bound to the caught object.
+#  There is no `newException`: the exception object is constructed directly.
+
 type
   MyError = ref object of Exception
     code: int
-  Deeper = ref object of MyError
-    depth: int
 
-proc risky(n: int) {.raises: MyError.} =
-  if n > 2:
-    raise Deeper(msg: "deep " & $n, code: n, depth: n * 2)
-  elif n > 0:
-    raise MyError(msg: "shallow " & $n, code: n)
+proc mayFail(x: int): int {.raises: MyError.} =
+  if x < 0:
+    raise MyError(msg: "negative", code: 7)
+  result = x * 2
 
-proc guarded(n: int): string =
-  result = "ok"
+proc run(x: int) =
   try:
-    risky(n)
-  except Deeper as e:
-    result = "deeper:" & e.msg & ":" & $e.depth
+    let v = mayFail(x)
+    echo "ok: ", v
   except MyError as e:
-    result = "my:" & e.msg & ":" & $e.code
-  finally:
-    result = result & "|fin"
+    echo "caught: ", e.msg, " code=", e.code
 
-for i in 0 .. 3:
-  echo guarded(i)
-
-proc boom() {.raises: MyError.} =
-  raise MyError(msg: "inner", code: 1)
-
-proc nested(): string =
-  result = ""
-  try:
-    try:
-      boom()
-    finally:
-      result = result & "A"
-  except MyError as e:
-    result = result & "B" & e.msg
-  result = result & "C"
-echo nested()
-
-proc deferred(n: int): int =
-  result = 0
-  defer: result = result * 10
-  for i in 1 .. n:
-    result = result + i
-echo deferred(4)
+run(5)
+run(-1)
+run(3)
+run(-42)

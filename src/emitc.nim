@@ -828,7 +828,16 @@ proc genLocalVar(s: Node): string =
   # INITIALIZER position, so genInit, not genExpr — a local `const` is emitted
   # `static const`, and a static object's initializer must be a constant
   # expression, which a compound literal is not. See genInit.
-  return decl & (if hasInit: " = " & genInit(value) else: "") & ";"
+  #
+  # A local with NO initializer is ZERO in nimony and INDETERMINATE in C. That is
+  # not a warning-level difference, it is a semantic one: emitting a bare `T x;`
+  # hands the program whatever was on the stack. It surfaced as gcc's
+  # `'result_0.fld_1' may be used uninitialized` on the raise path of a proc
+  # returning the (ErrorCode, value) pair — the value half is never assigned
+  # there, so the returned struct carried a garbage field. Benign only because
+  # the caller checks the code first; the next such case need not be. `= {0}` is
+  # valid for scalars, pointers, structs and unions alike.
+  return decl & (if hasInit: " = " & genInit(value) else: " = {0}") & ";"
 
 proc genIf(s: Node): string =
   var outp = ""
