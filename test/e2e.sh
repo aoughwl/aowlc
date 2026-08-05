@@ -56,7 +56,17 @@ done; done
 # with no binary, indistinguishable from a real error. Caught on an exceptions
 # fixture that compiles, links and matches nimony perfectly when gcc is left
 # alone. Capture in full; truncate only for display.
-gccall=$(gcc "$out"/*.c -o "$out/$name" -lm 2>&1)
+# -Wall -Wextra, on purpose: this is the check that would have caught `return;`
+# from a non-void function the day it was written, instead of years later via a
+# fixture that looked like a compile failure. The corpus is clean under both,
+# minus two classes that are noise for GENERATED code and not defects:
+#   -Wunused-parameter          a `{.base.}` method legitimately ignores its
+#                               receiver, and an emitter cannot omit the param
+#   -Wmissing-field-initializers  brace elision plus a designator override
+#                               (`{ (&vt), .Q.w_0 = 3, .h_0 = 5 }`) is correct C99
+# Everything else stays on, and a nonzero count is reported on its own line.
+gccall=$(gcc -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
+             "$out"/*.c -o "$out/$name" -lm 2>&1)
 if [ ! -f "$out/$name" ]; then
   echo "COMPILE-FAIL $name  ($n modules): $(printf '%s' "$gccall" | head -1)"
   rm -rf "$nc" "$out"; exit 1
