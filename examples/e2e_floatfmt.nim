@@ -1,0 +1,21 @@
+import std/syncio
+echo 1.5
+echo 3.0
+echo -0.0
+echo 0.0
+echo 1.0 / 3.0
+echo 1e5
+echo 1e14
+echo 1e15
+echo 1e16
+echo 1e17
+echo 1e20
+echo 1e21
+echo 1e-5
+echo 1e-6
+echo 1e-7
+echo 123456789.125
+echo 0.1
+echo 1.0e100
+echo -2.5e-8
+echo 1234567890123456.0

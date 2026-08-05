@@ -50,8 +50,22 @@ for d in "$nc"/*/; do for cn in "$d"*.c.nif; do
   [ -f "$cn" ] || continue; b=$(basename "$cn" .c.nif)
   "$AOWLC" "$cn" > "$out/$b.c" 2>/dev/null; n=$((n+1))
 done; done
-gccerr=$(gcc "$out"/*.c -o "$out/$name" -lm 2>&1 | head -1)
-if [ ! -f "$out/$name" ]; then echo "COMPILE-FAIL $name  ($n modules): $gccerr"; rm -rf "$nc" "$out"; exit 1; fi
+# DO NOT pipe gcc into `head` here. `gcc … 2>&1 | head -1` makes head exit after
+# one line, and gcc then dies of SIGPIPE writing its second diagnostic — so a
+# program that merely produced two lines of WARNINGS was reported COMPILE-FAIL
+# with no binary, indistinguishable from a real error. Caught on an exceptions
+# fixture that compiles, links and matches nimony perfectly when gcc is left
+# alone. Capture in full; truncate only for display.
+gccall=$(gcc "$out"/*.c -o "$out/$name" -lm 2>&1)
+if [ ! -f "$out/$name" ]; then
+  echo "COMPILE-FAIL $name  ($n modules): $(printf '%s' "$gccall" | head -1)"
+  rm -rf "$nc" "$out"; exit 1
+fi
+# Warnings are not free: `return;` from a non-void function, an implicit
+# declaration or an incompatible pointer is our emitter being wrong in a way that
+# happens to survive this gcc, this ABI and this optimisation level. Report them.
+warn=$(printf '%s' "$gccall" | grep -c 'warning:')
+[ "$warn" -gt 0 ] && echo "WARNINGS $name: gcc emitted $warn warning(s) on our C"
 got=$("$out/$name" 2>/dev/null | tr -d '\r')
 # A mismatch must be RED. This used to fall through to the implicit exit 0 of the
 # last command, so the one outcome the gate exists to catch — our binary printing

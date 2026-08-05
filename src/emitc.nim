@@ -794,6 +794,26 @@ proc declName(name: string; pragmas: Node): string =
     return beforeDot(name)
   return mangleToC(name)
 
+## The C name of the `result` local of the function being emitted, or "" when it
+## has none (a void proc, or one that returns explicitly). nimony spells an early
+## exit as `(ret .)` — "return whatever `result` holds" — and genStmt has no other
+## way to know what that is. Saved/restored around each genProc.
+var curResultVar = ""
+
+## the C name of a body's `result` local: nimony declares it as an ordinary
+## `(var :result.0 . TYPE .)`, so it is found by name, not by tag.
+proc resultVarOf(body: Node; depth = 0): string =
+  result = ""
+  if body == nil or depth > 3: return
+  for k in body.kids:
+    if not isList(k): continue
+    if oneOf(k.tag, ["var", "let", "cursor"]) and k.kids.len > 1 and isAtom(k.kids[0]):
+      if beforeDot(k.kids[0].atom) == "result":
+        return declName(k.kids[0].atom, k.kids[1])
+    elif oneOf(k.tag, ["stmts", "scope"]):
+      let inner = resultVarOf(k, depth + 1)
+      if inner.len > 0: return inner
+
 proc genLocalVar(s: Node): string =
   let nameAtom = s.kids[0]
   let pragmas = s.kids[1]
@@ -888,7 +908,16 @@ proc genStmt(s: Node): string =
   elif t == "store":
     return genLvalue(s.kids[1]) & " = " & genExpr(s.kids[0]) & ";"
   elif t == "ret":
-    if s.kids.len == 0 or isDot(s.kids[0]): return "return;"
+    if s.kids.len == 0 or isDot(s.kids[0]):
+      # `(ret .)` means "return the proc's `result`". Emitting a bare `return;`
+      # from a function WITH a return type is undefined behaviour — the caller
+      # reads an indeterminate value. It went unnoticed because gcc only warns,
+      # and because a struct return goes through a hidden pointer on this ABI, so
+      # the value happened to arrive anyway. A different type, ABI or -O would not
+      # be so kind. gcc's warning was itself invisible: the gate piped gcc into
+      # `head -1` and killed it with SIGPIPE.
+      if curResultVar.len > 0: return "return " & curResultVar & ";"
+      return "return;"
     return "return " & genExpr(s.kids[0]) & ";"
   elif t == "if":
     return genIf(s)
@@ -978,7 +1007,11 @@ proc genProc(p: Node): string =
   let pp = procParts(p)
   let sig = procSignature(p)
   if pp.body == nil: return sig & ";"
-  return sig & " {\n" & genStmt(pp.body) & "\n}"
+  let saved = curResultVar
+  curResultVar = if pp.ret == nil or isDot(pp.ret): "" else: resultVarOf(pp.body)
+  let bodyC = genStmt(pp.body)
+  curResultVar = saved
+  return sig & " {\n" & bodyC & "\n}"
 
 # ---------------------------------------------------------------------------
 # literal-node check (for deciding inline global initializers)
