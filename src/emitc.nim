@@ -1108,9 +1108,16 @@ proc genObjectFields(body: Node): string =
       fields.add "};\n"
   return fields
 
-proc genObjectDecl(nm: string; body: Node; isUnion: bool): string =
+proc genObjectDecl(nm: string; body: Node; isUnion: bool; isPacked = false): string =
   let kw = if isUnion: "typedef union " else: "typedef struct "
-  return kw & nm & " {\n" & genObjectFields(body) & "} " & nm & ";"
+  # `{.packed.}` was DROPPED: the attribute was never emitted, so C padded the
+  # struct as usual and `object(char, int64, char)` came out 24 bytes where
+  # nimony's `sizeof` — and aowlabi — say 10, with every field after the first at
+  # the wrong offset. Silent: it compiles, runs, and disagrees with the compiler
+  # about layout, which is the one thing a backend must not do. Caught by
+  # aowlabi's C-backend gate on its first extended run.
+  let attr = if isPacked: " __attribute__((packed))" else: ""
+  return kw & nm & " {\n" & genObjectFields(body) & "}" & attr & " " & nm & ";"
 
 proc genEnumDecl(nm: string; body: Node): string =
   let base = body.kids[0]
@@ -1133,7 +1140,8 @@ proc genTypeDecl(td: Node): string =
   let nm = mangleToC(nameAtom.atom)
   if isList(body):
     if body.tag == "object" or body.tag == "union":
-      return genObjectDecl(nm, body, body.tag == "union")
+      return genObjectDecl(nm, body, body.tag == "union",
+                           hasPragma(pragmas, ["packed"]))
     if body.tag == "enum":
       return genEnumDecl(nm, body)
     if body.tag == "array":
