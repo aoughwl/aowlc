@@ -24,6 +24,13 @@
 # loop. Exit 1 = a stage failed; exit 2 = the script could not even set up (no
 # .c.nif located).
 set -uo pipefail
+# The machine-wide compile lock. Two `nimony c` runs at once corrupt each other's
+# link through the shared `nimcache_static` — a CROSS-PROCESS hazard a private
+# `--nimcache:` does not cover, because the static object is shared across
+# caches. Unlocked, this gate's result depended on nobody else compiling at the
+# same moment, and the damage surfaced as a failure attributed to aowlc.
+LOCK="$HOME/.aowl/bin/nimlock"
+[ -x "$LOCK" ] || LOCK=""
 src="${1:-}"; shift || true
 [ -n "$src" ] || { echo "usage: driver.sh <prog.nim> [entryProc] [--arg V]..." >&2; exit 2; }
 entry=""
@@ -42,7 +49,7 @@ done
 name=$(basename "$src" .nim)
 AOWLC="${AOWLC:-$HOME/aowlc/bin/aowlc}"
 nc=$(mktemp -d); out=$(mktemp -d)
-~/nimony/bin/nimony c --nimcache:"$nc" "$src" >/dev/null 2>&1
+$LOCK ~/nimony/bin/nimony c --nimcache:"$nc" "$src" >/dev/null 2>&1
 
 own=""
 for d in "$nc"/*/ "$nc"/; do

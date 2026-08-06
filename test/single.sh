@@ -17,10 +17,17 @@
 #   1  a stage FAILED (SOLO-COMPILE FAIL / ALL-COMPILE FAIL)
 #   2  setup failed — no .c.nif located, or the printer emitted nothing
 set -uo pipefail
+# The machine-wide compile lock. Two `nimony c` runs at once corrupt each other's
+# link through the shared `nimcache_static` — a CROSS-PROCESS hazard a private
+# `--nimcache:` does not cover, because the static object is shared across
+# caches. Unlocked, this gate's result depended on nobody else compiling at the
+# same moment, and the damage surfaced as a failure attributed to aowlc.
+LOCK="$HOME/.aowl/bin/nimlock"
+[ -x "$LOCK" ] || LOCK=""
 src="$1"; name=$(basename "$src" .nim)
 AOWLC="${AOWLC:-$HOME/aowlc/bin/aowlc-native}"
 nc=$(mktemp -d); out=$(mktemp -d)
-~/nimony/bin/nimony c --nimcache:"$nc" "$src" >/dev/null 2>&1
+$LOCK ~/nimony/bin/nimony c --nimcache:"$nc" "$src" >/dev/null 2>&1
 
 # the program's OWN module: the .c.nif whose sibling .final.build.nif exists
 own=""

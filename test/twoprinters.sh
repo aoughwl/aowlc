@@ -20,6 +20,13 @@
 #
 # Requires: NIM (default ~/nimony), node, gcc.
 set -uo pipefail
+# The machine-wide compile lock. Two `nimony c` runs at once corrupt each other's
+# link through the shared `nimcache_static` — a CROSS-PROCESS hazard a private
+# `--nimcache:` does not cover, because the static object is shared across
+# caches. Unlocked, this gate's result depended on nobody else compiling at the
+# same moment, and the damage surfaced as a failure attributed to aowlc.
+LOCK="$HOME/.aowl/bin/nimlock"
+[ -x "$LOCK" ] || LOCK=""
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 NIM="${NIM:-$HOME/nimony}"
@@ -71,7 +78,7 @@ for src in "${SRCS[@]}"; do
   nc="$out/nc/$name"; rm -rf "$nc"; mkdir -p "$nc"
   # Reference and artifacts are SEPARATE runs, as in e2e.sh: `c -r` prints the
   # program's output, and a second `c --nimcache:` leaves the .c.nif behind.
-  ref=$("$NIM/bin/nimony" c -r "$src" 2>/dev/null); refrc=$?
+  ref=$($LOCK "$NIM/bin/nimony" c -r "$src" 2>/dev/null); refrc=$?
   # Compile a copy named `src.nim`, so the program's OWN artifact is the one
   # whose basename starts with "src". Every fixture here is `e2e_*`, and nimony
   # derives the artifact prefix from the file name, so the obvious heuristic
@@ -79,7 +86,7 @@ for src in "${SRCS[@]}"; do
   sdir="$out/src/$name"; rm -rf "$sdir"; mkdir -p "$sdir"
   if [ "$entry" = main.nim ]; then cp "$(dirname "$src")"/*.nim "$sdir/"
   else cp "$src" "$sdir/src.nim"; fi
-  "$NIM/bin/nimony" c --nimcache:"$nc" "$sdir/$entry" >/dev/null 2>&1
+  $LOCK "$NIM/bin/nimony" c --nimcache:"$nc" "$sdir/$entry" >/dev/null 2>&1
   # An empty or failed reference asserts nothing — the VACUOUS case e2e.sh
   # already documents. Skip rather than score "" against "".
   if [ "$refrc" -ne 0 ] || [ -z "$ref" ]; then [ "${DBG:-0}" = 1 ] && echo "  skip(ref) $name rc=$refrc"; skipped+=("$name"); continue; fi

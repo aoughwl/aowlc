@@ -57,6 +57,17 @@ programs using them and diffs the output against nimony's own binary. Anything
 aowlc can't print still raises `aowlc: unsupported …`, so a gap is visible rather
 than silently wrong.
 
+**Every `nimony c` in this repo goes through the machine-wide lock** (`nimlock`).
+It did not before: `build.sh`, `test/e2e.sh`, `test/driver.sh`, `test/single.sh`
+and `test/twoprinters.sh` all invoked nimony directly — seven call sites, and
+`e2e.sh`'s reference build did not even pass a `--nimcache:`. Two nimony compiles
+running at once corrupt each other's link through the shared `nimcache_static`,
+which a private `--nimcache:` does *not* cover because the static object is
+shared across caches. Unlocked, a red here could be another instance's compile
+rather than anything about aowlc, and no run was repeatable. Verified with three
+other instances queued on the same lock: `test/e2e.sh examples/hello.nim` waits
+its turn and passes, where before it would have raced them.
+
 ## Usage
 
 ```sh

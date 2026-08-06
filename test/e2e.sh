@@ -3,6 +3,13 @@
 # run, and compare stdout to nimony's own binary. No subset oracle — real behavior.
 #   test/e2e.sh <prog.nim>
 set -uo pipefail
+# The machine-wide compile lock. Two `nimony c` runs at once corrupt each other's
+# link through the shared `nimcache_static` — a CROSS-PROCESS hazard a private
+# `--nimcache:` does not cover, because the static object is shared across
+# caches. Unlocked, this gate's result depended on nobody else compiling at the
+# same moment, and the damage surfaced as a failure attributed to aowlc.
+LOCK="$HOME/.aowl/bin/nimlock"
+[ -x "$LOCK" ] || LOCK=""
 # $2 is an optional DISPLAY name. A multi-module case is a directory whose entry
 # point is main.nim, so every one of them would otherwise report as "main".
 src="$1"; name="${2:-$(basename "$src" .nim)}"
@@ -16,7 +23,7 @@ AOWLC="${AOWLC:-$HOME/aowlc/bin/aowlc-native}"
 # by ${PIPESTATUS[0]} reads the status of `tr` (the substitution is not a pipeline
 # in this shell), and tr essentially never fails — so NO-REFERENCE below could
 # never fire and every failed oracle would have been labelled VACUOUS instead.
-ref=$(~/nimony/bin/nimony c -r "$src" 2>/dev/null); refrc=$?
+ref=$($LOCK ~/nimony/bin/nimony c -r "$src" 2>/dev/null); refrc=$?
 ref=$(printf '%s' "$ref" | tr -d '\r')
 # AN EMPTY REFERENCE IS NOT A PASS. The comparison at the bottom is `got = ref`,
 # so when nimony's own run prints nothing, ANY binary of ours that also prints
@@ -46,7 +53,7 @@ if [ "$refrc" -ne 0 ] || [ -z "$ref" ]; then
   fi
   exit 2
 fi
-nc=$(mktemp -d); ~/nimony/bin/nimony c --nimcache:"$nc" "$src" >/dev/null 2>&1
+nc=$(mktemp -d); $LOCK ~/nimony/bin/nimony c --nimcache:"$nc" "$src" >/dev/null 2>&1
 out=$(mktemp -d); n=0
 for d in "$nc"/*/; do for cn in "$d"*.c.nif; do
   [ -f "$cn" ] || continue; b=$(basename "$cn" .c.nif)
