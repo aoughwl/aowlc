@@ -117,8 +117,12 @@ function mangleToC(s) {
 // C string literal, faithful to mangler.makeCString / toCChar.
 function makeCString(s) {
   let r = '"';
-  for (const ch of s) {
-    const code = ch.charCodeAt(0);
+  // BYTES, not code points. A nimony string is a byte string and src/emitc.nim
+  // iterates it as one; `for (const ch of s)` in JS walks code points, so `é`
+  // produced a single `\351` where the two UTF-8 bytes `\303\251` were needed —
+  // every non-ASCII string came out as replacement characters.
+  for (const code of new TextEncoder().encode(s)) {
+    const ch = String.fromCharCode(code);
     if ((code >= 0 && code <= 0x1F) || (code >= 0x7F)) {
       // THREE digits, zero-padded. An unpadded octal escape merges with a digit
       // that follows it in the same literal: "\n7" emitted `\12` then `7`, and C
