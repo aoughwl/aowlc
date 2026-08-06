@@ -120,7 +120,11 @@ function makeCString(s) {
   for (const ch of s) {
     const code = ch.charCodeAt(0);
     if ((code >= 0 && code <= 0x1F) || (code >= 0x7F)) {
-      r += "\\" + code.toString(8);
+      // THREE digits, zero-padded. An unpadded octal escape merges with a digit
+      // that follows it in the same literal: "\n7" emitted `\12` then `7`, and C
+      // reads `\127` as one escape — the string printed `W`. src/emitc.nim uses
+      // toOctal3 for exactly this; the JavaScript printer never got the fix.
+      r += "\\" + code.toString(8).padStart(3, "0");
     } else if (ch === "'" || ch === '"' || ch === "\\" || ch === "?") {
       r += "\\" + ch;
     } else r += ch;

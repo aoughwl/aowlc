@@ -34,13 +34,18 @@ command -v node >/dev/null || { echo "twoprinters: node not on PATH" >&2; exit 1
 # its const-folder rows.
 #
 #   e2e_distinctglobal   a distinct conversion at global scope
-#   e2e_escapes          string escapes (aowlc.js produces no output at all)
 #   e2e_strprint         non-ASCII string printing
+#
+# e2e_escapes used to be here and is not any more: aowlc.js emitted an UNPADDED
+# octal escape, so "\n7" became `\12` + `7` and C read `\127` as one escape (the
+# string printed `W`). emitc.nim had been fixed with toOctal3; the JavaScript
+# printer had not. The gate reported it as a STALE EXEMPTION the moment it
+# agreed, which is the contract working.
 #
 # Each was fixed in the nimony printer and not in the JavaScript one, which is
 # exactly what this gate exists to surface. Whether aowlc.js should be brought
 # level or retired is a product decision, not this script's.
-KNOWN_JS_BEHIND="e2e_distinctglobal e2e_escapes e2e_strprint"
+KNOWN_JS_BEHIND="e2e_distinctglobal e2e_strprint"
 isKnownJs() { for k in $KNOWN_JS_BEHIND; do [ "$k" = "$1" ] && return 0; done; return 1; }
 
 out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
