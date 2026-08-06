@@ -629,7 +629,8 @@ class Emitter {
     const nm = mangleToC(nameAtom.atom);
     if (isList(body)) {
       if (body.tag === "object" || body.tag === "union") {
-        return this.genObjectDecl(nm, body, body.tag === "union");
+        return this.genObjectDecl(nm, body, body.tag === "union",
+                                  this.hasPragma(pragmas, ["packed"]));
       }
       if (body.tag === "enum") return this.genEnumDecl(nm, body);
       if (body.tag === "array") {
@@ -647,9 +648,15 @@ class Emitter {
     if (isAtom(body)) return "typedef " + this.typeName(body.atom) + " " + nm + ";";
     return null;
   }
-  genObjectDecl(nm, body, isUnion) {
+  genObjectDecl(nm, body, isUnion, isPacked) {
     const kw = isUnion ? "typedef union " : "typedef struct ";
-    return kw + nm + " {\n" + this.genObjectFields(body) + "} " + nm + ";";
+    // `{.packed.}` was DROPPED here, as it was in src/emitc.nim: C then padded
+    // the struct as usual and `object(char, int64, char)` came out 24 bytes where
+    // nimony's own `sizeof` — and aowlabi — say 10, with every field after the
+    // first at a different offset. It compiles, it runs, and it disagrees with
+    // the compiler about layout.
+    const attr = isPacked ? " __attribute__((packed))" : "";
+    return kw + nm + " {\n" + this.genObjectFields(body) + "}" + attr + " " + nm + ";";
   }
   // Emit the members of an object/union body.  Handles the optional inheritance
   // parent, plain `fld`s, and `case`-object variants: a `union` child becomes an
