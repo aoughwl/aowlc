@@ -93,10 +93,18 @@ rather than wholesale, because `bin/aowlc` finds siblings by taking the other
 `.c.nif` files in the directory — right for a nimcache, wrong for `examples/`,
 where the neighbours are unrelated programs.
 
-Every TU now compiles. What remains is link-level: hexer inlines a cross-module
-proc body into the caller's module, so two TUs can define the same function.
-`build`/`run` are unaffected — they link the whole program into ONE TU, which is
-the mode aowlabi's layout gate measures the JS printer through.
+It also emits a real **prototype** for a proc a sibling defines, instead of
+letting `stubExterns` invent `NI64 f() { return 0; }` — a stub that collides at
+link time and, where it does link, silently answers 0 for the real computation.
+A global whose symbol names another module as its owner becomes an `extern`
+declaration rather than a second definition, and the prelude's `LENGC_ERR_` /
+`LENGC_OVF_` are `static` as they are in `emitc.nim`.
+
+Every TU now compiles. What remains is one link-level case: a proc such as
+`nimIcheckB_0_sysvq0asl` whose body hexer placed in the *main* module rather
+than its owner's, which no other TU then defines. `build`/`run`/`link` are
+unaffected — they put the whole program in ONE TU, which is the mode aowlabi's
+layout gate measures the JS printer through (js 26/26).
 
 ### `build`/`run` are whole-PROGRAM
 

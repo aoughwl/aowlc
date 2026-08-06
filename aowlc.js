@@ -876,6 +876,12 @@ function orderTypesByValueDeps(types, em) {
   return order;
 }
 
+// A proc's name atom without needing an Emitter instance: (proc name pragmas …).
+function em0proc(pr) {
+  const a = pr.kids && pr.kids[0];
+  return a && typeof a.atom === "string" ? a.atom : null;
+}
+
 function classify(nodes) {
   const root = nodes.find((n) => isList(n) && n.tag === "stmts");
   if (!root) throw new Error("aowlc: no top-level (stmts …) found — is this a .c.nif?");
@@ -1037,20 +1043,24 @@ function compileModule(snif, opts = {}) {
     const wanted = new Set();
     collectAtoms(c.root, wanted);
 
-    const sibTypes = new Map(), sibGlobals = new Map();
+    const sibTypes = new Map(), sibGlobals = new Map(), sibProcs = new Map();
     for (const sib of opts.siblings) {
       const sn = readNif(sib.src);
       if (sib.hash) for (const n of sn) canonicalizeOwnSyms(n, sib.hash);
       const sc = classify(sn);
       for (const td of sc.types) if (!sibTypes.has(td.kids[0].atom)) sibTypes.set(td.kids[0].atom, td);
       for (const g of sc.globals) if (!sibGlobals.has(g.kids[0].atom)) sibGlobals.set(g.kids[0].atom, g);
+      for (const pr of sc.procs) {
+        const pn = em0proc(pr); if (pn && !sibProcs.has(pn)) sibProcs.set(pn, pr);
+      }
     }
 
     // Own declarations always win; a pulled-in type's own body can reference
     // further imported types, so close over it rather than doing one pass.
     const haveT = new Set(c.types.map((td) => td.kids[0].atom));
     const haveG = new Set(c.globals.map((g) => g.kids[0].atom));
-    const ext = [], queue = [...wanted];
+    const haveP = new Set(c.procs.map((pr) => em0proc(pr)));
+    const ext = [], extProcs = [], queue = [...wanted];
     while (queue.length) {
       const nm = queue.pop();
       if (!haveT.has(nm) && sibTypes.has(nm)) {
@@ -1066,9 +1076,36 @@ function compileModule(snif, opts = {}) {
         haveG.add(nm); ext.push(g);
         const more = new Set(); collectAtoms(g.kids[2], more);
         for (const m of more) if (!haveT.has(m) && sibTypes.has(m)) queue.push(m);
+        continue;
+      }
+      // A proc a sibling DEFINES and this TU only calls: a real PROTOTYPE, which
+      // is what the native printer emits. Without it stubExterns invents
+      // `NI64 f() { return 0; }` — a definition that both collides at link time
+      // and, where it does link, silently answers 0 for the real computation.
+      if (!haveP.has(nm) && sibProcs.has(nm)) {
+        const pr = sibProcs.get(nm);
+        haveP.add(nm); extProcs.push(pr);
+        const more = new Set(); collectAtoms(pr, more);
+        for (const m of more) if (!haveT.has(m) && sibTypes.has(m)) queue.push(m);
       }
     }
+    // A global whose symbol names ANOTHER module as its owner is that module's
+    // to define; this TU only gets a declaration. nimony re-states an imported
+    // vtable const (`Inh_0_vt_cty4i727z`) in every module that constructs the
+    // object, and defining it in each TU is a duplicate symbol at link time —
+    // which is why it was `static const` here before, at the cost of being
+    // unreachable from the module that actually needs it. The native printer
+    // emits `extern Rtti_0_… Inh_0_vt_…;` for exactly this case.
+    if (opts.hash) {
+      const own = [];
+      for (const g of c.globals) {
+        const a = g.kids[0].atom, owner = a.slice(a.lastIndexOf(".") + 1);
+        if (owner && owner !== opts.hash) ext.push(g); else own.push(g);
+      }
+      c.globals = own;
+    }
     c.externGlobals = ext;
+    c.externProcs = extProcs;
   }
 
   return emitUnit(c, opts);
@@ -1113,6 +1150,8 @@ function emitUnit(parts, opts = {}) {
   // `NI64 x() { return 0; }` both lies and collides ("redeclared as a different
   // kind of symbol" — a proc-typed global is not a proc).
   for (const g of extGlobals) definedSyms.add(g.kids[0].atom);
+  const extProcs = parts.externProcs || [];
+  for (const pr of extProcs) { const nm = em0proc(pr); if (nm) definedSyms.add(nm); }
 
   // Forward-declare every object/union struct first, so a typedef that points
   // to a struct defined later in source order still resolves (C11 lets the full
@@ -1135,6 +1174,12 @@ function emitUnit(parts, opts = {}) {
 
   // prototypes for all procs (order-independent calls)
   const protos = [];
+  // Procs a sibling module defines: prototype only, never a body and never a
+  // stub. `extern` is implicit on a function declaration.
+  for (const pr of extProcs) {
+    if (em.hasPragma(em.procParts(pr).pragmas, ["nodecl", "importc", "importcpp"])) continue;
+    protos.push(em.procSignature(pr).sig + ";");
+  }
   const defs = [];
   const provisionsNeeded = new Set();
   for (const p of procs) {
@@ -1226,7 +1271,7 @@ function emitUnit(parts, opts = {}) {
     out += "/* --- imported C headers --- */\n" +
       [...headers].map((h) => "#include " + (h.startsWith("<") ? h : '"' + h + '"')).join("\n") + "\n\n";
   }
-  out += "/* --- error/overflow flags --- */\n_Thread_local NB8 LENGC_ERR_;\n_Thread_local NB8 LENGC_OVF_;\n\n";
+  out += "/* --- error/overflow flags --- */\nstatic _Thread_local NB8 LENGC_ERR_;\nstatic _Thread_local NB8 LENGC_OVF_;\n\n";
   if (fwdDecls.length) out += "/* --- forward type declarations --- */\n" + fwdDecls.join("\n") + "\n\n";
   if (typeDecls.length) out += "/* --- types --- */\n" + typeDecls.join("\n") + "\n\n";
   if (protos.length) out += "/* --- prototypes --- */\n" + protos.join("\n") + "\n\n";
@@ -1308,7 +1353,7 @@ function compileHarness(snif, entry, argExprs = []) {
   }
 
   let out = PRELUDE + "\n#include <stdio.h>\n\n";
-  out += "_Thread_local NB8 LENGC_ERR_;\n_Thread_local NB8 LENGC_OVF_;\n\n";
+  out += "static _Thread_local NB8 LENGC_ERR_;\nstatic _Thread_local NB8 LENGC_OVF_;\n\n";
   if (typeDecls.length) out += typeDecls.join("\n") + "\n\n";
   if (protos.length) out += protos.join("\n") + "\n\n";
   if (data.length) out += data.join("\n") + "\n\n";
