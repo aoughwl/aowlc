@@ -262,10 +262,14 @@ Two more are permitted and declared, because neither is aowlc's to fix today:
 `-Wformat`, where nimony's own `system` prints an integer with
 `fprintf(stderr, "%lld", x)` and `x` is `NI64` — `long` on LP64, not `long long`
 (same width, so right on every target we build for and wrong by the standard;
-filed against aowlsem); and `-Woverride-init`, where a constructor over an
-inherited type emits `{ (&vt), .Q.w_0 = 3, .h_0 = 5 }` and a designator
-re-initialises a field a positional initialiser already set — the value is
-right, the initialiser is redundant, and gcc is reporting the redundancy.
+filed against aowlsem); and `-Woverride-init`, which fires exactly twice, on the
+`{.union.}` constructor in `examples/e2e_packed.nim`. nimony's lowering puts a
+kv for **every** union member in the oconstr, so `United(i: 5)` emits
+`{ .i_0 = 5, .f_0 = 0.0, .c_0 = 0 }` and each designator overwrites the last —
+which is why `u.i` reads back 0. gcc is reporting a real overwrite, not a
+redundancy; both printers and nimony's own binary produce the 0, so the fixture
+asserts that they *agree*, not that 0 is right. Also nimony's lowering, also
+filed.
 
 ## Layout is cross-checked against aowlabi
 

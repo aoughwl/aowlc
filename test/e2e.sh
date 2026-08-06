@@ -114,14 +114,17 @@ strictout=$(gcc -fsyntax-only -Wall -Wextra \
 # string is nimony's, not this emitter's, so fixing it here is not possible and
 # patching nimony is not ours to do. Filed against aowlsem.
 #
-# -Wno-override-init is the second declared one, and unlike the six it points at
-# something real: an object constructor over an inherited/packed type emits
-# `{ (&vt), .Q.w_0 = 3, .h_0 = 5 }`, where a designator re-initialises a field a
-# positional initialiser already set. The later one wins, so the value is right
-# — the comment above already calls this pattern correct C99 — but the emitted
-# initialiser is REDUNDANT, and gcc is reporting the redundancy rather than a
-# defect. Worth removing at the emitter; permitted here so the other categories
-# can be enforced today instead of waiting on it.
+# -Wno-override-init is the second declared one, and it is not cosmetic either:
+# it fires exactly twice in the corpus, on examples/e2e_packed.nim's `{.union.}`
+# constructor. nimony's lowering puts a kv for EVERY union member in the
+# oconstr, so `United(i: 5)` emits
+#   United u = { .i_0 = 5, .f_0 = 0.0, .c_0 = 0 };
+# and in a C union each designator overwrites the last, which is why `u.i` reads
+# back 0. gcc is reporting a real semantic overwrite, not a redundancy. Both
+# aowlc printers AND nimony's own binary produce the 0, so the fixture asserts
+# that they agree rather than that 0 is right; it is nimony's lowering, already
+# filed to aowlsem, and not something this emitter can fix. Permitted here so
+# the other categories can be enforced today instead of waiting on it.
 swarn=$(printf '%s' "$strictout" | grep -c 'warning:\|error:')
 if [ "$swarn" -gt 0 ]; then
   echo "STRICT-WARN $name: $swarn diagnostic(s) the prelude's pragmas were hiding"
