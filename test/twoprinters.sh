@@ -49,13 +49,24 @@ KNOWN_JS_BEHIND=""
 isKnownJs() { for k in $KNOWN_JS_BEHIND; do [ "$k" = "$1" ] && return 0; done; return 1; }
 
 out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
-mapfile -t SRCS < <(ls examples/*.nim | sort)
+# Single-module fixtures AND the multi-module directories (examples/<d>/main.nim).
+# The multi-module case is not decoration: `aowlc.js` mangled an own-module type
+# to `Derived_0_` where every cross-module use said `Derived_0_cty4i727z`, and no
+# single-module gate could see it — there every use was unsuffixed too.
+mapfile -t SRCS < <({ ls examples/*.nim; ls -d examples/*/ 2>/dev/null | while read -r d; do
+  [ -f "$d/main.nim" ] && echo "$d/main.nim"; done; } | sort)
 PLAN=${#SRCS[@]}
 [ "$PLAN" -gt 0 ] || { echo "twoprinters: no examples/*.nim found"; exit 1; }
 
 ran=0; both=0; jsbad=(); natbad=(); skipped=(); knownjs=(); stale=()
 for src in "${SRCS[@]}"; do
-  name=$(basename "$src" .nim)
+  # A multi-module fixture is named for its DIRECTORY and keeps its own entry
+  # file name; a single-module one is copied to `src.nim` (see below).
+  if [ "$(basename "$src")" = main.nim ]; then
+    name=$(basename "$(dirname "$src")"); entry=main.nim; pfx=main
+  else
+    name=$(basename "$src" .nim); entry=src.nim; pfx=src
+  fi
   ran=$((ran+1))
   nc="$out/nc/$name"; rm -rf "$nc"; mkdir -p "$nc"
   # Reference and artifacts are SEPARATE runs, as in e2e.sh: `c -r` prints the
@@ -66,17 +77,28 @@ for src in "${SRCS[@]}"; do
   # derives the artifact prefix from the file name, so the obvious heuristic
   # (first three letters) matches most of the corpus at once.
   sdir="$out/src/$name"; rm -rf "$sdir"; mkdir -p "$sdir"
-  cp "$src" "$sdir/src.nim"
-  "$NIM/bin/nimony" c --nimcache:"$nc" "$sdir/src.nim" >/dev/null 2>&1
+  if [ "$entry" = main.nim ]; then cp "$(dirname "$src")"/*.nim "$sdir/"
+  else cp "$src" "$sdir/src.nim"; fi
+  "$NIM/bin/nimony" c --nimcache:"$nc" "$sdir/$entry" >/dev/null 2>&1
   # An empty or failed reference asserts nothing — the VACUOUS case e2e.sh
   # already documents. Skip rather than score "" against "".
   if [ "$refrc" -ne 0 ] || [ -z "$ref" ]; then [ "${DBG:-0}" = 1 ] && echo "  skip(ref) $name rc=$refrc"; skipped+=("$name"); continue; fi
   ref=$(printf '%s' "$ref" | tr -d '\r\000')
 
   own=""
-  for d in "$nc"/*/ "$nc"/; do for cn in "$d"src*.c.nif; do
+  for d in "$nc"/*/ "$nc"/; do for cn in "$d$pfx"*.c.nif; do
     [ -f "$cn" ] && own="$cn"
   done; done
+  # Fallback for a multi-module fixture whose entry artifact nimony did not name
+  # after the entry FILE: nimony puts every module of a program in one nimcache
+  # directory named after the entry module, so the .c.nif whose basename matches
+  # its parent directory is the one carrying `main`.
+  if [ -z "$own" ]; then
+    for d in "$nc"/*/; do for cn in "$d"*.c.nif; do
+      [ -f "$cn" ] || continue
+      [ "$(basename "$cn" .c.nif)" = "$(basename "${d%/}")" ] && own="$cn"
+    done; done
+  fi
   [ -n "$own" ] || { [ "${DBG:-0}" = 1 ] && echo "  skip(own) $name"; skipped+=("$name"); continue; }
 
   # the JS printer, through the driver that ships it

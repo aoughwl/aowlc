@@ -171,7 +171,7 @@ where nimony says 42 — and fixing `emitc.nim` left `aowlc.js` still wrong.
 
 `test/twoprinters.sh` runs the corpus through both and compares each against
 **nimony's** output, not against each other, so it says which one is wrong.
-**70/70 agree in both**, and its `KNOWN_JS_BEHIND` list is empty.
+**73/73 agree in both**, and its `KNOWN_JS_BEHIND` list is empty. It covers the multi-module fixtures (`examples/<d>/main.nim`) as well as the single-module ones — the case that hid the own-module-suffix bug, since in a single-module program every use is unsuffixed too.
 
 It did not start there. The gate opened with three entries, each a fix that had
 landed in the nimony printer and not the JavaScript one, and a fourth turned up
