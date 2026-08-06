@@ -28,27 +28,24 @@ AOWLC="${AOWLC:-$root/bin/aowlc-native}"
 [ -x "$AOWLC" ] || { echo "twoprinters: no $AOWLC — run build.sh first" >&2; exit 1; }
 command -v node >/dev/null || { echo "twoprinters: node not on PATH" >&2; exit 1; }
 
-# Fixtures where aowlc.js is KNOWN to be behind src/emitc.nim. Listing them is
-# not ignoring them: a name here that starts AGREEING fails the gate, so the
-# exemption cannot outlive the divergence — the same contract run32.sh uses for
-# its const-folder rows.
+# Fixtures where aowlc.js is KNOWN to be behind src/emitc.nim.
 #
-#   e2e_distinctglobal   a distinct conversion at global scope
+# EMPTY, and that is the point. It held three entries when this gate was written
+# and all three were places a fix had landed in the nimony printer and not the
+# JavaScript one:
 #
-# e2e_strprint used to be here too: aowlc.js walked a string by CODE POINT where
-# a nimony string is BYTES, so `é` emitted one octal escape instead of its two
-# UTF-8 bytes and every non-ASCII string printed as replacement characters.
+#   e2e_escapes          an UNPADDED octal escape, so "\n7" emitted `\12` + `7`
+#                        and C read `\127` as one escape — the string printed `W`
+#   e2e_strprint         strings walked by CODE POINT where a nimony string is
+#                        BYTES, so `é` emitted one escape instead of its two UTF-8
+#                        bytes and non-ASCII printed as replacement characters
+#   e2e_distinctglobal   a conversion wrapping a constructor emitted `((T)(T){…})`,
+#                        and the cast is what stops an initializer being constant
 #
-# e2e_escapes used to be here and is not any more: aowlc.js emitted an UNPADDED
-# octal escape, so "\n7" became `\12` + `7` and C read `\127` as one escape (the
-# string printed `W`). emitc.nim had been fixed with toOctal3; the JavaScript
-# printer had not. The gate reported it as a STALE EXEMPTION the moment it
-# agreed, which is the contract working.
-#
-# Each was fixed in the nimony printer and not in the JavaScript one, which is
-# exactly what this gate exists to surface. Whether aowlc.js should be brought
-# level or retired is a product decision, not this script's.
-KNOWN_JS_BEHIND="e2e_distinctglobal"
+# Each was reported as a STALE EXEMPTION the moment it started agreeing, which is
+# the only reason a list like this is safe to keep: it cannot outlive the
+# divergence it records.
+KNOWN_JS_BEHIND=""
 isKnownJs() { for k in $KNOWN_JS_BEHIND; do [ "$k" = "$1" ] && return 0; done; return 1; }
 
 out=$(mktemp -d); trap 'rm -rf "$out"' EXIT

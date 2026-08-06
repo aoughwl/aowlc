@@ -419,6 +419,16 @@ class Emitter {
     if (e !== undefined && isList(e) && (e.tag === "aconstr" || e.tag === "oconstr")) {
       return this.constrBody(e);
     }
+    // A CONVERSION wrapping a constructor is the same problem one level out: a
+    // distinct global emitted `((T)(T){ … })`, and the cast is what stops the
+    // initializer being constant — gcc rejected `who`/`greeting` in
+    // e2e_distinctglobal outright. A distinct/derived conversion is a no-op on
+    // the representation, so the initializer is its value.
+    if (e !== undefined && isList(e) &&
+        (e.tag === "conv" || e.tag === "dconv" || e.tag === "hconv") &&
+        e.kids.length >= 2) {
+      return this.genInit(e.kids[e.kids.length - 1]);
+    }
     return this.genExpr(e);
   }
 

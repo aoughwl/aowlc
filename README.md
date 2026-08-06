@@ -171,10 +171,23 @@ where nimony says 42 — and fixing `emitc.nim` left `aowlc.js` still wrong.
 
 `test/twoprinters.sh` runs the corpus through both and compares each against
 **nimony's** output, not against each other, so it says which one is wrong.
-Currently **62/65** agree in both. Three fixtures are listed in
-`KNOWN_JS_BEHIND` as places `aowlc.js` trails `emitc.nim`
-(`e2e_distinctglobal`, `e2e_escapes`, `e2e_strprint`); a name there that starts
-agreeing fails the gate, so the exemption cannot outlive the divergence.
+**70/70 agree in both**, and its `KNOWN_JS_BEHIND` list is empty.
+
+It did not start there. The gate opened with three entries, each a fix that had
+landed in the nimony printer and not the JavaScript one, and a fourth turned up
+by emitting aowlabi's layout corpus through both:
+
+| | `aowlc.js` did | should |
+|---|---|---|
+| `{.emit.}` | dropped it (41 where nimony says 42) | emit the inline C |
+| `{.packed.}` | dropped it (24 bytes where nimony says 10) | `__attribute__((packed))` |
+| octal escapes | unpadded, so `"\n7"` → `\12`+`7` → C reads `\127` = `W` | three digits |
+| non-ASCII | walked CODE POINTS, `é` → one escape | walk BYTES |
+| distinct global | `((T)(T){…})` — a cast is not a constant initializer | drop the cast |
+
+Every one was reported as a **stale exemption** the moment it started agreeing,
+which is the only reason a known-divergence list is safe to keep: it cannot
+outlive the divergence it records.
 
 ## Layout is cross-checked against aowlabi
 
