@@ -78,6 +78,26 @@ node bin/aowlc exec examples/mathf.c.nif --entry classify --arg 15         # -> 
 node bin/aowlc link <nimcache>/<main>/*.c.nif --emit-only -o /tmp/program.c
 ```
 
+### The single-TU limits differ per printer
+
+`bin/aowlc-native` emits a self-contained TU for any module (`test/single-all.sh`,
+77/77): it reads through nifreader, whose index lets it follow an imported symbol
+into its owning module and re-emit the type body.
+
+`aowlc.js` text-parses one file and cannot follow a symbol anywhere, so `emit`
+used to produce C referencing `RootObj_0_sysvq0asl` with nothing declaring it.
+It is now given the sibling `.c.nif` files and pulls in, **transitively and only
+what the module actually references**, the imported type declarations plus
+`extern` lines and C-name/header mappings for imported globals. Reference-driven
+rather than wholesale, because `bin/aowlc` finds siblings by taking the other
+`.c.nif` files in the directory — right for a nimcache, wrong for `examples/`,
+where the neighbours are unrelated programs.
+
+Every TU now compiles. What remains is link-level: hexer inlines a cross-module
+proc body into the caller's module, so two TUs can define the same function.
+`build`/`run` are unaffected — they link the whole program into ONE TU, which is
+the mode aowlabi's layout gate measures the JS printer through.
+
 ### `build`/`run` are whole-PROGRAM
 
 `build` and `run` link the module together with its siblings — nimony puts every

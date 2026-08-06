@@ -77,7 +77,7 @@ function ccCompile(cFile, outBin, opts) {
 // Produce C for a whole-module build or a harness, depending on opts.entry.
 function toC(src, opts) {
   if (opts.entry) return aowlc.compileHarness(src, opts.entry, opts.args.map(argToC));
-  return aowlc.compileModule(src, { stubExterns: !opts.noStubs, hash: opts.hash });
+  return aowlc.compileModule(src, { stubExterns: !opts.noStubs, hash: opts.hash, siblings: opts.siblings });
 }
 
 // The other modules of the SAME program. nimony puts every module of a program
@@ -127,6 +127,15 @@ function main() {
   if (cmd === "emit") {
     const file = o._[0];
     o.hash = baseName(file);   // the module's own-symbol suffix — see compileModule
+    // Hand compileModule the sibling modules so it can declare the IMPORTED
+    // types this one uses by value. Type declarations only; the siblings are
+    // still linked as their own TUs. --single opts out (one file, nothing else
+    // read), which is how you see the raw per-module output.
+    if (!o.single && !o.entry) {
+      o.siblings = programModules(file)
+        .filter((f) => path.resolve(f) !== path.resolve(file))
+        .map((f) => ({ src: readSrc(f), hash: baseName(f) }));
+    }
     const c = toC(readSrc(file), o);
     if (o.out) { fs.writeFileSync(o.out, c); console.error("aowlc: wrote " + o.out); }
     else process.stdout.write(c);

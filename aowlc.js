@@ -629,12 +629,25 @@ class Emitter {
     const nm = this.declName(nameAtom.atom, pragmas);
     const isConst = g.tag === "const";
     let decl = this.declare(type, nm);
-    if (isConst) decl = "static const " + decl;
+    // `const` but NOT `static`: a vtable const (`Inh_0_vt_…`) is referenced from
+    // every module that constructs the object, so internal linkage makes it
+    // unresolvable there. This matches what the native printer emits.
+    if (isConst) decl = "const " + decl;
     const hasInit = value !== undefined && !isDot(value) && isLiteralNode(value);
     // INITIALIZER position (genInit), same rule at file scope.
     return { name: nm, decl: decl + (hasInit ? " = " + this.genInit(value) : "") + ";",
              nameAtom: nameAtom.atom, needsInit: value !== undefined && !isDot(value) && !hasInit,
              value };
+  }
+
+  // The same global as a DECLARATION rather than a definition: no initializer,
+  // no `static` (which would give it internal linkage and defeat the point).
+  // Used for a global that a SIBLING module defines and this TU only references.
+  genExternGlobal(g) {
+    const nameAtom = g.kids[0], pragmas = g.kids[1], type = g.kids[2];
+    return { name: this.declName(nameAtom.atom, pragmas),
+             nameAtom: nameAtom.atom,
+             decl: "extern " + this.declare(type, this.declName(nameAtom.atom, pragmas)) + ";" };
   }
 
   // --- type declarations ----------------------------------------------------
@@ -995,7 +1008,70 @@ function classifyProgram(mods) {
 function compileModule(snif, opts = {}) {
   const nodes = readNif(snif);
   if (opts.hash) for (const n of nodes) canonicalizeOwnSyms(n, opts.hash);
-  return emitUnit(classify(nodes), opts);
+  const c = classify(nodes);
+
+  // A single TU cannot compile at all if the module uses an IMPORTED type by
+  // value: `RootObj_0_sysvq0asl Q;` needs the complete struct, and an extern
+  // stub can stand in for a missing function but nothing can stand in for a
+  // missing type. The native printer reads through nifreader, whose index lets
+  // it follow the symbol into its owning module and re-emit the body; this one
+  // text-parses a single file and cannot, so the caller hands us the sibling
+  // .c.nif files (`opts.siblings`, as [{src, hash}]).
+  //
+  // TYPE declarations only — the procs, globals and top statements of the other
+  // modules are NOT ours to emit; they are linked in as their own TUs. Own
+  // declarations win on a name collision, and orderTypesByValueDeps sorts the
+  // merged set, so the imported ones need no particular order here.
+  if (opts.siblings && opts.siblings.length) {
+    // Only what this module actually REFERENCES, transitively — never every
+    // type a sibling happens to declare. `bin/aowlc` finds siblings by taking
+    // the other .c.nif files in the directory, which is exactly right for a
+    // nimcache (nimony puts one program's modules in one directory) and exactly
+    // wrong for a fixture directory such as examples/, where the neighbours are
+    // unrelated programs. Pulling those in wholesale is how `emit system.c.nif`
+    // ended up with a foreign typedef ordered ahead of LongString's own.
+    const collectAtoms = (n, out) => {
+      if (isList(n)) { for (const k of n.kids) collectAtoms(k, out); return; }
+      if (n && typeof n.atom === "string") out.add(n.atom);
+    };
+    const wanted = new Set();
+    collectAtoms(c.root, wanted);
+
+    const sibTypes = new Map(), sibGlobals = new Map();
+    for (const sib of opts.siblings) {
+      const sn = readNif(sib.src);
+      if (sib.hash) for (const n of sn) canonicalizeOwnSyms(n, sib.hash);
+      const sc = classify(sn);
+      for (const td of sc.types) if (!sibTypes.has(td.kids[0].atom)) sibTypes.set(td.kids[0].atom, td);
+      for (const g of sc.globals) if (!sibGlobals.has(g.kids[0].atom)) sibGlobals.set(g.kids[0].atom, g);
+    }
+
+    // Own declarations always win; a pulled-in type's own body can reference
+    // further imported types, so close over it rather than doing one pass.
+    const haveT = new Set(c.types.map((td) => td.kids[0].atom));
+    const haveG = new Set(c.globals.map((g) => g.kids[0].atom));
+    const ext = [], queue = [...wanted];
+    while (queue.length) {
+      const nm = queue.pop();
+      if (!haveT.has(nm) && sibTypes.has(nm)) {
+        const td = sibTypes.get(nm);
+        haveT.add(nm); c.types.push(td);
+        const more = new Set(); collectAtoms(td, more);
+        for (const m of more) if (!haveT.has(m) && sibTypes.has(m)) queue.push(m);
+        continue;
+      }
+      // A global a sibling DEFINES and this TU only uses: `extern T x;`.
+      if (!haveG.has(nm) && sibGlobals.has(nm)) {
+        const g = sibGlobals.get(nm);
+        haveG.add(nm); ext.push(g);
+        const more = new Set(); collectAtoms(g.kids[2], more);
+        for (const m of more) if (!haveT.has(m) && sibTypes.has(m)) queue.push(m);
+      }
+    }
+    c.externGlobals = ext;
+  }
+
+  return emitUnit(c, opts);
 }
 
 // Emit one whole-program translation unit from several modules linked together
@@ -1021,12 +1097,22 @@ const RUNTIME_PROVISIONS = {
 function emitUnit(parts, opts = {}) {
   const { procs, globals, types, topStmts } = parts;
   const em = new Emitter();
-  buildExternMaps(em, procs, globals, types);
+  // Sibling globals count for extern-NAME purposes too: an `{.importc.}` global
+  // such as syncio's `stdout` must be spelled by its C name at the use site even
+  // though this TU does not declare it, and only the OWNING module carries the
+  // pragma that says so. Without this the use site keeps the mangled name and
+  // nothing declares it.
+  const extGlobals = parts.externGlobals || [];
+  buildExternMaps(em, procs, globals.concat(extGlobals), types);
 
   const definedSyms = new Set();
   const procByName = new Map();
   for (const p of procs) { const nm = em.procParts(p).nameAtom.atom; procByName.set(nm, p); definedSyms.add(nm); }
   for (const g of globals) definedSyms.add(g.kids[0].atom);
+  // A name we declare `extern` is resolved at link time, so stubbing it to
+  // `NI64 x() { return 0; }` both lies and collides ("redeclared as a different
+  // kind of symbol" — a proc-typed global is not a proc).
+  for (const g of extGlobals) definedSyms.add(g.kids[0].atom);
 
   // Forward-declare every object/union struct first, so a typedef that points
   // to a struct defined later in source order still resolves (C11 lets the full
@@ -1093,6 +1179,14 @@ function emitUnit(parts, opts = {}) {
 
   // globals + their deferred (non-literal) initialisers
   const data = [], inits = [];
+  // Globals a sibling module defines and this one only uses: `extern T x;`,
+  // which is what the native printer emits and what makes a per-module TU
+  // linkable. An extern declaration never forces a definition, so an unused one
+  // costs nothing.
+  for (const g of extGlobals) {
+    if (em.hasPragma(g.kids[1], ["nodecl", "importc", "importcpp", "header"])) continue;
+    data.push(em.genExternGlobal(g).decl);
+  }
   for (const g of globals) {
     // An imported/nodecl global (a libc symbol or a predefined macro such as
     // __ATOMIC_SEQ_CST) is provided externally — defining it here would clash.
@@ -1115,6 +1209,7 @@ function emitUnit(parts, opts = {}) {
   };
   for (const p of procs) addHeaders(em.procParts(p).pragmas);
   for (const g of globals) addHeaders(g.kids[1]);
+  for (const g of extGlobals) addHeaders(g.kids[1]);   // e.g. <stdio.h> for stdout
   for (const td of types) addHeaders(td.kids.find((k) => isList(k) && k.tag === "pragmas"));
 
   // libc-backed implementations for no-header importc runtime symbols (the
