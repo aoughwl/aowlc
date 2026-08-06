@@ -143,6 +143,7 @@ bash test/units.sh                      # unit asserts, N of N declared
 bash test/staticinit.sh                 # file-scope vs block-scope initialiser emission
 npm test                                # exec-mode entry points + whole-program link/run
 bash test/cnif-fresh.sh                 # the committed .c.nif still match their .nim
+bash ~/aifjs/tests/cross.sh --sample 6  # this corpus through aowljs, and its through ours
 bash test/driver.sh examples/hello.nim  # the DRIVER (build + exec), not the raw printer
 bash test/single.sh examples/hello.nim  # one TU alone vs all modules — separates a
                                         # codegen bug from a whole-module-emission one
