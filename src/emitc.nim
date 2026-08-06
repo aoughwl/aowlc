@@ -954,7 +954,21 @@ proc genStmt(s: Node): string =
     return genKeepOverflow(s)
   elif t == "raise":
     return "/* raise */ (void)0;"
-  elif t == "pragmas" or t == "comment" or t == "emit" or t == "smry":
+  elif t == "emit":
+    # `{.emit: "…".}` is INLINE C, and emitting it is the entire point of the
+    # pragma for a C backend. It was grouped with `pragmas`/`comment` and returned
+    # "" — dropped silently. nimony's own backend honours it, so a program using
+    # it compiled here and answered WRONG with no diagnostic anywhere: a proc
+    # whose emitted C incremented `result` returned 41 where nimony says 42.
+    var outp = ""
+    for k in s.kids:
+      if k == nil: continue
+      elif k.kind == nkStr: outp.add k.strVal      # verbatim C
+      elif isAtom(k): outp.add mangleToC(k.atom)   # a symbol interpolated into it
+      else: outp.add genExpr(k)
+    if outp.len > 0 and outp[outp.len - 1] != ';': outp.add ";"
+    return outp
+  elif t == "pragmas" or t == "comment" or t == "smry":
     return ""
   else:
     fail("aowlc: unsupported stmt '" & t & "'")
