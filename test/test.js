@@ -8,7 +8,12 @@ const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
 const AOWLC = path.join(ROOT, "bin", "aowlc");
-const EX = path.join(ROOT, "examples");
+// Overridable so the SAME expectations can be run against freshly regenerated
+// .c.nif artifacts (test/cnif-fresh.sh). The ones committed under examples/ are
+// inputs nobody regenerates, so the .nim beside them can drift with every gate
+// staying green — this suite would go on measuring the old artifact. Measured:
+// editing three of the .nim sources changed nothing here at all.
+const EX = process.env.AOWLC_CNIF_DIR || path.join(ROOT, "examples");
 
 // [file, entry, args, expected-stdout]
 const CASES = [
@@ -54,7 +59,7 @@ function run(file, entry, args) {
   return r.stdout.trim();
 }
 
-let pass = 0, fail = 0;
+let pass = 0, fail = 0, skipped = 0;
 for (const [file, entry, args, want] of CASES) {
   const label = `${entry}(${args.join(",")})`.padEnd(22);
   try {
@@ -109,7 +114,11 @@ for (const file of MODULE_BUILDS) {
   ];
   for (const [name, want, what] of PROGS) {
     const dir = path.join(EX, name);
-    if (!haveCC || !fs.existsSync(dir)) { console.log(`  skip whole-program link ${name} (no cc or fixtures)`); continue; }
+    if (!haveCC || !fs.existsSync(dir)) {
+      console.log(`  skip whole-program link ${name} (no cc or fixtures)`);
+      skipped++;              // counted, not vanished — see the summary
+      continue;
+    }
     // runtime modules first, the module with `main` last
     const mods = fs.readdirSync(dir).filter((f) => f.endsWith(".c.nif")).map((f) => path.join(dir, f));
     const main = mods.find((f) => fs.readFileSync(f, "utf8").includes('exportc "main"'));
@@ -121,5 +130,10 @@ for (const file of MODULE_BUILDS) {
   }
 }
 
-console.log(`\n${pass}/${pass + fail} passed`);
+// A skip must not shrink the denominator. `${pass}/${pass+fail}` counts only
+// the cases that RAN, so two whole-program cases skipping for want of their
+// fixture directories turned 24/24 into 22/22 — a smaller run that reads
+// exactly like a clean one. Report the plan and the skips explicitly.
+const plan = pass + fail + skipped;
+console.log(`\n${pass}/${plan} passed` + (skipped ? `, ${skipped} skipped (no cc or fixtures)` : ""));
 process.exit(fail ? 1 : 0);
