@@ -984,8 +984,18 @@ function classifyProgram(mods) {
 }
 
 // Emit a complete, self-contained C translation unit for one module.
+//
+// `opts.hash` is the module's id (its .c.nif basename), and it is not optional
+// in practice: on disk an OWN-module symbol carries an empty trailing hash slot
+// (`Derived.0.`), which mangles to `Derived_0_` while every cross-module use of
+// the same type mangles to `Derived_0_cty4i727z`. The whole-program path already
+// expands it via canonicalizeOwnSyms; this single-TU path did not, so `emit`
+// declared each of a module's own types under a name nothing else referred to.
+// Single-module programs never noticed — every use was unsuffixed too.
 function compileModule(snif, opts = {}) {
-  return emitUnit(classify(readNif(snif)), opts);
+  const nodes = readNif(snif);
+  if (opts.hash) for (const n of nodes) canonicalizeOwnSyms(n, opts.hash);
+  return emitUnit(classify(nodes), opts);
 }
 
 // Emit one whole-program translation unit from several modules linked together

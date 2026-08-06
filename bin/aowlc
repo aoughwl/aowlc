@@ -77,7 +77,7 @@ function ccCompile(cFile, outBin, opts) {
 // Produce C for a whole-module build or a harness, depending on opts.entry.
 function toC(src, opts) {
   if (opts.entry) return aowlc.compileHarness(src, opts.entry, opts.args.map(argToC));
-  return aowlc.compileModule(src, { stubExterns: !opts.noStubs });
+  return aowlc.compileModule(src, { stubExterns: !opts.noStubs, hash: opts.hash });
 }
 
 // The other modules of the SAME program. nimony puts every module of a program
@@ -126,6 +126,7 @@ function main() {
 
   if (cmd === "emit") {
     const file = o._[0];
+    o.hash = baseName(file);   // the module's own-symbol suffix — see compileModule
     const c = toC(readSrc(file), o);
     if (o.out) { fs.writeFileSync(o.out, c); console.error("aowlc: wrote " + o.out); }
     else process.stdout.write(c);
@@ -147,7 +148,7 @@ function main() {
         console.error("aowlc: linking " + prog.n + " modules (--single for this module alone)");
       }
     }
-    if (c === null) c = toC(src, o);
+    if (c === null) { o.hash = baseName(file); c = toC(src, o); }
     if (o.emitC) process.stdout.write(c + "\n");
 
     const tmpDir = process.env.AOWLC_TMP || fs.mkdtempSync(path.join(os.tmpdir(), "aowlc-"));
