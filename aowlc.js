@@ -1067,7 +1067,9 @@ function compileModule(snif, opts = {}) {
         const td = sibTypes.get(nm);
         haveT.add(nm); c.types.push(td);
         const more = new Set(); collectAtoms(td, more);
-        for (const m of more) if (!haveT.has(m) && sibTypes.has(m)) queue.push(m);
+        for (const m of more) if ((!haveT.has(m) && sibTypes.has(m)) ||
+                                  (!haveP.has(m) && sibProcs.has(m)) ||
+                                  (!haveG.has(m) && sibGlobals.has(m))) queue.push(m);
         continue;
       }
       // A global a sibling DEFINES and this TU only uses: `extern T x;`.
@@ -1075,7 +1077,9 @@ function compileModule(snif, opts = {}) {
         const g = sibGlobals.get(nm);
         haveG.add(nm); ext.push(g);
         const more = new Set(); collectAtoms(g.kids[2], more);
-        for (const m of more) if (!haveT.has(m) && sibTypes.has(m)) queue.push(m);
+        for (const m of more) if ((!haveT.has(m) && sibTypes.has(m)) ||
+                                  (!haveP.has(m) && sibProcs.has(m)) ||
+                                  (!haveG.has(m) && sibGlobals.has(m))) queue.push(m);
         continue;
       }
       // A proc a sibling DEFINES and this TU only calls: a real PROTOTYPE, which
@@ -1084,9 +1088,21 @@ function compileModule(snif, opts = {}) {
       // and, where it does link, silently answers 0 for the real computation.
       if (!haveP.has(nm) && sibProcs.has(nm)) {
         const pr = sibProcs.get(nm);
-        haveP.add(nm); extProcs.push(pr);
+        haveP.add(nm);
+        // An `{.inline.}` proc is emitted `static inline`, i.e. INTERNAL linkage
+        // per TU, so a prototype alone leaves an undefined reference — C
+        // requires an inline function to be DEFINED in every TU that calls it.
+        // Copy the whole thing; anything else gets a prototype and links.
+        const prag = pr.kids.find((k) => isList(k) && k.tag === "pragmas");
+        const isInline = !!(prag && prag.kids.some((q) => isList(q) ? q.tag === "inline"
+                                                                    : q && q.atom === "inline"));
+        const last = pr.kids[pr.kids.length - 1];
+        if (isInline && isList(last) && last.tag === "stmts") c.procs.push(pr);
+        else extProcs.push(pr);
         const more = new Set(); collectAtoms(pr, more);
-        for (const m of more) if (!haveT.has(m) && sibTypes.has(m)) queue.push(m);
+        for (const m of more) if ((!haveT.has(m) && sibTypes.has(m)) ||
+                                  (!haveP.has(m) && sibProcs.has(m)) ||
+                                  (!haveG.has(m) && sibGlobals.has(m))) queue.push(m);
       }
     }
     // A global whose symbol names ANOTHER module as its owner is that module's
@@ -1096,6 +1112,24 @@ function compileModule(snif, opts = {}) {
     // which is why it was `static const` here before, at the cost of being
     // unreachable from the module that actually needs it. The native printer
     // emits `extern Rtti_0_… Inh_0_vt_…;` for exactly this case.
+    // Same rule for PROCS. hexer copies a generic instance (e.g.
+    // `raiseIndexError3_0_I…_sysvq0asl`) into every module that instantiates it,
+    // so emitting a body wherever one appears defines the same function in four
+    // TUs. The owning module defines it; everyone else gets a prototype. An
+    // `{.inline.}` proc is exempt — `static inline` is internal linkage, so it
+    // must be defined in every TU that calls it.
+    if (opts.hash) {
+      const ownProcs = [];
+      for (const pr of c.procs) {
+        const a = em0proc(pr) || "", owner = a.slice(a.lastIndexOf(".") + 1);
+        const prag = pr.kids.find((k) => isList(k) && k.tag === "pragmas");
+        const isInline = !!(prag && prag.kids.some((q) => isList(q) ? q.tag === "inline"
+                                                                    : q && q.atom === "inline"));
+        if (owner && owner !== opts.hash && !isInline) extProcs.push(pr);
+        else ownProcs.push(pr);
+      }
+      c.procs = ownProcs;
+    }
     if (opts.hash) {
       const own = [];
       for (const g of c.globals) {
@@ -1140,7 +1174,8 @@ function emitUnit(parts, opts = {}) {
   // pragma that says so. Without this the use site keeps the mangled name and
   // nothing declares it.
   const extGlobals = parts.externGlobals || [];
-  buildExternMaps(em, procs, globals.concat(extGlobals), types);
+  const extProcs0 = parts.externProcs || [];
+  buildExternMaps(em, procs.concat(extProcs0), globals.concat(extGlobals), types);
 
   const definedSyms = new Set();
   const procByName = new Map();
