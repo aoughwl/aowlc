@@ -801,22 +801,24 @@ typedef NI64 NI;      typedef NU64 NU;
 #define NIM_ALIGN(x)  __attribute__((aligned(x)))
 #define NIM_ALIGNOF(x) __alignof__(x)
 #if defined(__GNUC__) || defined(__clang__)
+#  /* Eight more pragmas used to sit here: -Wint-conversion,
+#     -Wincompatible-pointer-types, -Wbuiltin-declaration-mismatch,
+#     -Wimplicit-function-declaration, -Wmain, -Wreturn-type,
+#     -Wparentheses, -Wattributes. Measured across the whole e2e corpus
+#     with the pragmas stripped: not one of them fires. They suppressed
+#     nothing and could only ever hide a NEW defect -- -Wreturn-type is
+#     exactly what hid a bare no-value return emitted from a
+#     struct-returning function. test/e2e.sh enforces that they stay
+#     silent. The six below DO fire and are noise for generated code:
+#     an emitter cannot know a label or a temp goes unused. */
 #  pragma GCC diagnostic ignored "-Wpointer-sign"
 #  pragma GCC diagnostic ignored "-Wunused-label"
 #  pragma GCC diagnostic ignored "-Wunused-variable"
 #  pragma GCC diagnostic ignored "-Wunused-function"
 #  pragma GCC diagnostic ignored "-Wformat"
 #  pragma GCC diagnostic ignored "-Wdiscarded-qualifiers"
-#  pragma GCC diagnostic ignored "-Wint-conversion"
-#  pragma GCC diagnostic ignored "-Wincompatible-pointer-types"
-#  pragma GCC diagnostic ignored "-Wbuiltin-declaration-mismatch"
-#  pragma GCC diagnostic ignored "-Wimplicit-function-declaration"
-#  pragma GCC diagnostic ignored "-Wmain"
-#  pragma GCC diagnostic ignored "-Wreturn-type"
-#  pragma GCC diagnostic ignored "-Wparentheses"
 #  pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 #  pragma GCC diagnostic ignored "-Wmissing-braces"
-#  pragma GCC diagnostic ignored "-Wattributes"
 #endif
 `;
 

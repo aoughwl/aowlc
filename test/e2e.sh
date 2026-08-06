@@ -78,6 +78,55 @@ fi
 # happens to survive this gcc, this ABI and this optimisation level. Report them.
 warn=$(printf '%s' "$gccall" | grep -c 'warning:')
 [ "$warn" -gt 0 ] && echo "WARNINGS $name: gcc emitted $warn warning(s) on our C"
+# ...and that count was very nearly a fiction. Our own PRELUDE opens with
+# sixteen `#pragma GCC diagnostic ignored` lines, and an in-file pragma BEATS
+# the command line — so `-Wall -Wextra` above was switched off, inside the very
+# files it was measuring, for precisely the categories the comment says it
+# exists to catch (`-Wimplicit-function-declaration`, `-Wreturn-type`,
+# `-Wincompatible-pointer-types`, `-Wint-conversion`, …). "The corpus is clean
+# under both" was true the way an unrun test is green.
+#
+# So measure again on a STRIPPED copy — the pragma lines removed, nothing else
+# touched. The link above still uses the real C, so what aowlc ships is
+# unchanged; this is a second, syntax-only pass whose only job is to see what
+# the pragmas were hiding.
+#
+# PERMITTED, and declared: six categories fire across the corpus and are noise
+# for generated code — an emitter cannot know a label or temp goes unused, and
+# brace elision is correct C. Everything else must not fire at all. Measured
+# before it was enforced: those six are the complete set that fires, so the
+# other ten pragmas suppress nothing and would only ever hide a new defect.
+strict="$out/strict"; mkdir -p "$strict"
+for c in "$out"/*.c; do
+  grep -v '^#  pragma GCC diagnostic ignored' "$c" > "$strict/$(basename "$c")"
+done
+strictout=$(gcc -fsyntax-only -Wall -Wextra \
+  -Wno-unused-parameter -Wno-missing-field-initializers \
+  -Wno-unused-variable -Wno-unused-label -Wno-unused-function \
+  -Wno-unused-but-set-variable -Wno-discarded-qualifiers -Wno-pointer-sign \
+  -Wno-missing-braces -Wno-format -Wno-override-init \
+  "$strict"/*.c 2>&1)
+# -Wno-format is the one permitted category that is NOT cosmetic, so it is
+# declared rather than folded in with the rest: nimony's own `system` prints an
+# integer with `fprintf(stderr, "%lld", x)` where `x` is `NI64` — `long` on
+# LP64, not `long long`. Same width, so it is right on every target we build
+# for, and wrong by the standard. aowlc reproduces it faithfully; the format
+# string is nimony's, not this emitter's, so fixing it here is not possible and
+# patching nimony is not ours to do. Filed against aowlsem.
+#
+# -Wno-override-init is the second declared one, and unlike the six it points at
+# something real: an object constructor over an inherited/packed type emits
+# `{ (&vt), .Q.w_0 = 3, .h_0 = 5 }`, where a designator re-initialises a field a
+# positional initialiser already set. The later one wins, so the value is right
+# — the comment above already calls this pattern correct C99 — but the emitted
+# initialiser is REDUNDANT, and gcc is reporting the redundancy rather than a
+# defect. Worth removing at the emitter; permitted here so the other categories
+# can be enforced today instead of waiting on it.
+swarn=$(printf '%s' "$strictout" | grep -c 'warning:\|error:')
+if [ "$swarn" -gt 0 ]; then
+  echo "STRICT-WARN $name: $swarn diagnostic(s) the prelude's pragmas were hiding"
+  printf '%s\n' "$strictout" | grep 'warning:\|error:' | head -5 | sed 's/^/  | /'
+fi
 got=$("$out/$name" 2>/dev/null | tr -d '\r')
 # A mismatch must be RED. This used to fall through to the implicit exit 0 of the
 # last command, so the one outcome the gate exists to catch — our binary printing
@@ -85,6 +134,10 @@ got=$("$out/$name" 2>/dev/null | tr -d '\r')
 # every caller (a loop over a corpus, CI, `&&`). COMPILE-FAIL above already
 # exits 1; this is the same class of result.
 rc=0
+# A diagnostic the prelude was hiding is a FAILURE, not a note. Reporting it on
+# stdout and exiting 0 is how the -Wall -Wextra above came to mean nothing for
+# years: the line was printed and the caller saw success.
+[ "$swarn" -gt 0 ] && rc=1
 if [ "$got" = "$ref" ]; then echo "PASS $name"; else echo "RUN-MISMATCH $name  ref=[$ref] got=[$got]"; rc=1; fi
 rm -rf "$nc" "$out"
 exit "$rc"

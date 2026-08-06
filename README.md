@@ -239,9 +239,33 @@ corpus is finite. Each printer carries its own copy of the C prelude
 run: the nimony printer suppressed twelve warnings the JavaScript one did not
 (`-Wimplicit-function-declaration`, `-Wincompatible-pointer-types`, `-Wmain`,
 `-Wreturn-type` and nine more), a difference nobody had decided. They agree now
-at 53 lines; whether that suppression list should be *shorter* is a separate
-question this gate does not answer, and one it now makes answerable in one
-place instead of two.
+at 55 lines.
+
+That suppression list turned out to be the next problem. `e2e.sh` compiles with
+`-Wall -Wextra` and its comment says so — but an in-file `#pragma GCC diagnostic
+ignored` **beats the command line**, and the prelude opened with sixteen of
+them, covering precisely the categories the comment cites as the reason the
+flags are there (`-Wimplicit-function-declaration`, `-Wreturn-type`,
+`-Wincompatible-pointer-types`, `-Wint-conversion`). "The corpus is clean under
+both" was true the way an unrun test is green.
+
+`e2e.sh` now compiles a second, syntax-only pass over a **stripped** copy — the
+pragma lines removed, nothing else — and a diagnostic there is a failure, not a
+printed note. Measured before it was enforced: six categories fire across the
+whole corpus and are noise for generated code (an emitter cannot know a label or
+temp goes unused), and **eight of the sixteen pragmas suppress nothing at all**.
+Those eight are gone from both preludes: they bought nothing and could only hide
+a future defect — `-Wreturn-type` is exactly what hid a bare `return;` emitted
+from a struct-returning function. 77/77 clean under the enforced set.
+
+Two more are permitted and declared, because neither is aowlc's to fix today:
+`-Wformat`, where nimony's own `system` prints an integer with
+`fprintf(stderr, "%lld", x)` and `x` is `NI64` — `long` on LP64, not `long long`
+(same width, so right on every target we build for and wrong by the standard;
+filed against aowlsem); and `-Woverride-init`, where a constructor over an
+inherited type emits `{ (&vt), .Q.w_0 = 3, .h_0 = 5 }` and a designator
+re-initialises a field a positional initialiser already set — the value is
+right, the initialiser is redundant, and gcc is reporting the redundancy.
 
 ## Layout is cross-checked against aowlabi
 
