@@ -230,6 +230,19 @@ Every one was reported as a **stale exemption** the moment it started agreeing,
 which is the only reason a known-divergence list is safe to keep: it cannot
 outlive the divergence it records.
 
+`twoprinters.sh` compares the two printers on **program behaviour**, which is
+exactly the comparison a prelude divergence survives: a `#pragma` one printer
+emits and the other does not only shows up on programs that reach it, and a
+corpus is finite. Each printer carries its own copy of the C prelude
+(`PRELUDE` in `aowlc.js`, `CPrelude` in `src/emitc.nim`), so `test/prelude.js`
+— part of `npm test` — diffs the two **texts**. It came up red on its first
+run: the nimony printer suppressed twelve warnings the JavaScript one did not
+(`-Wimplicit-function-declaration`, `-Wincompatible-pointer-types`, `-Wmain`,
+`-Wreturn-type` and nine more), a difference nobody had decided. They agree now
+at 53 lines; whether that suppression list should be *shorter* is a separate
+question this gate does not answer, and one it now makes answerable in one
+place instead of two.
+
 ## Layout is cross-checked against aowlabi
 
 [`aowlabi`](https://github.com/aoughwl/aowlabi) states the canonical ABI for the

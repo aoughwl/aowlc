@@ -6,7 +6,7 @@
   "main": "aowlc.js",
   "bin": { "aowlc": "bin/aowlc" },
   "scripts": {
-    "test": "node test/test.js"
+    "test": "node test/prelude.js && node test/test.js"
   },
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/aoughwl/aowlc.git" },
