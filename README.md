@@ -193,11 +193,19 @@ outlive the divergence it records.
 
 [`aowlabi`](https://github.com/aoughwl/aowlabi) states the canonical ABI for the
 stack, and its `tests/cbackend.sh` diffs that model against `sizeof`/`offsetof`
-applied by **gcc to the C this repo emits** — padding, object variants (an
+applied by **gcc to the C this repo emits — from BOTH printers** (native 26/26,
+js 26/26), each against the model rather than against each other — padding, object variants (an
 anonymous union), `{.packed.}`, `{.union.}`, a three-deep inheritance chain, sets,
 refs, proc fields, ranges, distinct and empty fields, plus the runtime `string`,
 `LongString` and `seq` headers. Run it from an aowlabi checkout; it skips itself,
 with a line, when there is no aowlc to measure.
+
+It also found `aowlc.js` mangling an own-module symbol to `Derived_0_` where
+every cross-module reference says `Derived_0_cty4i727z`: on disk the symbol is
+`Derived.0.` with an empty trailing hash slot, which nifreader expands for the
+native printer and the JavaScript text parser did not. `compileProgram` already
+called `canonicalizeOwnSyms`; the single-module `emit` path never got the hash.
+No single-module gate could see it, since there every use was unsuffixed too.
 
 That tier found `{.packed.}` being dropped here entirely — a packed object was 24
 bytes against nimony's 10, with every field after the first at a different
