@@ -3,7 +3,9 @@
 # run, and compare stdout to nimony's own binary. No subset oracle — real behavior.
 #   test/e2e.sh <prog.nim>
 set -uo pipefail
-src="$1"; name=$(basename "$src" .nim)
+# $2 is an optional DISPLAY name. A multi-module case is a directory whose entry
+# point is main.nim, so every one of them would otherwise report as "main".
+src="$1"; name="${2:-$(basename "$src" .nim)}"
 # Overridable, like driver.sh and single.sh already are: with the path hardcoded
 # to $HOME/aowlc a git WORKTREE cannot gate its own build — it silently measured
 # the main checkout's binary, which on this machine was stale enough to be missing

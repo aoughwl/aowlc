@@ -36,24 +36,41 @@ cd "$root"
 # stay deliberately silent.
 EXPECT_VACUOUS=(localconst compute fib mathf)
 
+# Single-module fixtures, then MULTI-MODULE ones: a directory under examples/
+# whose entry point is main.nim. Those exercise what a single .nim cannot — a
+# type, enum, exception or global declared in one module and used from another,
+# and module-initialisation ORDER — and emitc's output is per-module, so the
+# seam is exactly where a whole-program backend can disagree with itself.
 mapfile -t SRCS < <(ls examples/*.nim | sort)
+mapfile -t MMS < <(ls -d examples/*/ 2>/dev/null | sort)
 PLAN=${#SRCS[@]}
+for d in "${MMS[@]}"; do [ -f "$d/main.nim" ] && PLAN=$((PLAN+1)); done
 [ "$PLAN" -gt 0 ] || { echo "e2e-all: no examples/*.nim found — refusing to report a green run"; exit 1; }
+
+run_one() {   # $1 = entry .nim, $2 = display name
+  local src="$1" name="$2" out rc
+  out=$(bash test/e2e.sh "$src" "$name" 2>&1); rc=$?
+  ran=$((ran+1))
+  case $rc in
+    0) passed=$((passed+1)); printf '  ok       %-14s %s\n' "$name" "$(printf '%s' "$out" | head -1)" ;;
+    2) vacuous+=("$name")
+       printf '  vacuous  %-14s (asserts nothing)\n' "$name"
+       local e
+       for e in "${EXPECT_VACUOUS[@]}"; do [ "$e" = "$name" ] && return 0; done
+       unexpected+=("$name") ;;
+    *) failed+=("$name"); printf '  FAIL     %-14s\n' "$name"
+       printf '%s\n' "$out" | sed 's/^/           /' | head -4 ;;
+  esac
+  return 0
+}
 
 ran=0; passed=0; failed=(); vacuous=(); unexpected=()
 for src in "${SRCS[@]}"; do
-  name=$(basename "$src" .nim)
-  out=$(bash test/e2e.sh "$src" 2>&1); rc=$?
-  ran=$((ran+1))
-  case $rc in
-    0) passed=$((passed+1)); printf '  ok       %-12s %s\n' "$name" "$(printf '%s' "$out" | head -1)" ;;
-    2) vacuous+=("$name")
-       printf '  vacuous  %-12s (asserts nothing)\n' "$name"
-       for e in "${EXPECT_VACUOUS[@]}"; do [ "$e" = "$name" ] && continue 2; done
-       unexpected+=("$name") ;;
-    *) failed+=("$name"); printf '  FAIL     %-12s\n' "$name"
-       printf '%s\n' "$out" | sed 's/^/           /' | head -4 ;;
-  esac
+  run_one "$src" "$(basename "$src" .nim)"
+done
+for d in "${MMS[@]}"; do
+  [ -f "$d/main.nim" ] || continue
+  run_one "$d/main.nim" "$(basename "$d")"
 done
 
 echo
