@@ -95,6 +95,8 @@ rather than a missing link step.
 
 ```sh
 bash test/e2e-all.sh                    # the sweep, with a DECLARED denominator
+bash test/twoprinters.sh                # BOTH printers vs nimony — see below
+bash test/single-all.sh                 # every TU must also compile ALONE
 bash test/e2e.sh examples/hello.nim     # one case: emit EVERY module, gcc-link, diff vs nimony
 bash test/units.sh                      # unit asserts, N of N declared
 bash test/staticinit.sh                 # file-scope vs block-scope initialiser emission
@@ -153,6 +155,26 @@ node bin/aowlc exec nc/*/mymod*.c.nif --entry myproc --arg 42
 The cleanest self-owned native compiler reuses the one component that is
 genuinely hard to rebuild — hexer's lowering — and owns everything else:
 `nifparser` + `nifsem` → `hexer` → **aowlc** → `gcc`.
+
+## There are TWO printers, and they are compared
+
+- **`aowlc.js`** — the hand-written JavaScript one. `bin/aowlc`, the driver the
+  usage examples above invoke, uses it, and `npm test` is the only gate that did.
+- **`src/emitc.nim`** → `bin/aowlc-native` — the nimony one, which e2e, single-TU,
+  units and staticinit all measure.
+
+Every gate measured exactly one of them and nothing compared them, so a defect
+present in **both** could be fixed in one and stay in the other with every gate
+green. That is exactly what happened: `{.emit.}` was grouped with
+`pragmas`/`comment` in both and dropped silently — a program using it answered 41
+where nimony says 42 — and fixing `emitc.nim` left `aowlc.js` still wrong.
+
+`test/twoprinters.sh` runs the corpus through both and compares each against
+**nimony's** output, not against each other, so it says which one is wrong.
+Currently **62/65** agree in both. Three fixtures are listed in
+`KNOWN_JS_BEHIND` as places `aowlc.js` trails `emitc.nim`
+(`e2e_distinctglobal`, `e2e_escapes`, `e2e_strprint`); a name there that starts
+agreeing fails the gate, so the exemption cannot outlive the divergence.
 
 ## Layout is cross-checked against aowlabi
 

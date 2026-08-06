@@ -460,7 +460,24 @@ class Emitter {
       case "keepovf": return this.genKeepOverflow(s);
       case "raise":
         return "/* raise */ (void)0;";  // exceptions already lowered by eraiser; bare raise is a trap
-      case "pragmas": case "comment": case "emit": case "smry": return "";
+      case "emit": {
+        // `{.emit: "…".}` is INLINE C, and emitting it is the entire point of
+        // the pragma for a C backend. It was grouped with pragmas/comment and
+        // returned "" — dropped silently, so a program using it compiled and
+        // answered WRONG (41 where nimony says 42) with no diagnostic. The same
+        // defect was in src/emitc.nim; both printers had it, and nothing
+        // compares them, which is how it survived in two places at once.
+        let outp = "";
+        for (const k of s.kids) {
+          if (k == null) continue;
+          else if (k.str !== undefined) outp += k.str;   // verbatim C
+          else if (isAtom(k)) outp += mangleToC(k.atom); // interpolated symbol
+          else outp += this.genExpr(k);
+        }
+        if (outp.length > 0 && outp[outp.length - 1] !== ";") outp += ";";
+        return outp;
+      }
+      case "pragmas": case "comment": case "smry": return "";
       default: throw new Error("aowlc: unsupported stmt '" + s.tag + "'");
     }
   }
