@@ -51,9 +51,11 @@ nimony's real frontend + hexer:
 - the real `mangleToC` name mangling and the `importc`/`exportc` extern-name rule
 - a self-contained C prelude (`NI`/`NU`/`NF`/`NC8`/`NB8`/`NIM_TRUE`/…) — no nimony runtime needed for the core
 
-Not yet lowered here: the full system runtime (strings/seqs/`echo`, GC objects),
-which lives in the 54 KB `system` `.c.nif` module. Anything aowlc can't print
-raises `aowlc: unsupported …` so gaps are visible, never silently wrong.
+The system runtime is lowered too — strings, seqs, `echo`, exceptions, GC objects
+and method dispatch all run end to end. The e2e corpus below compiles and runs
+programs using them and diffs the output against nimony's own binary. Anything
+aowlc can't print still raises `aowlc: unsupported …`, so a gap is visible rather
+than silently wrong.
 
 ## Usage
 
@@ -92,11 +94,37 @@ rather than a missing link step.
 ## Tests
 
 ```sh
-bash test/e2e.sh examples/hello.nim     # emit EVERY module, gcc-link, diff vs nimony
+bash test/e2e-all.sh                    # the sweep, with a DECLARED denominator
+bash test/e2e.sh examples/hello.nim     # one case: emit EVERY module, gcc-link, diff vs nimony
+bash test/units.sh                      # unit asserts, N of N declared
+bash test/staticinit.sh                 # file-scope vs block-scope initialiser emission
+npm test                                # exec-mode entry points + whole-program link/run
 bash test/driver.sh examples/hello.nim  # the DRIVER (build + exec), not the raw printer
 bash test/single.sh examples/hello.nim  # one TU alone vs all modules — separates a
                                         # codegen bug from a whole-module-emission one
 ```
+
+`e2e.sh` compiles a program with nimony, emits C for **every** module with
+aowlc, links with `gcc -Wall -Wextra`, runs it, and requires the stdout to match
+nimony's own binary byte for byte. Three outcomes, because two would lie:
+
+| exit | outcome | meaning |
+|---|---|---|
+| 0 | `PASS` | output compared, and matched |
+| 1 | `MISMATCH` / `COMPILE-FAIL` | output compared and differed, or the build failed |
+| 2 | `VACUOUS` | the program prints nothing, so an empty-vs-empty comparison would report a pass while asserting nothing |
+
+A nonzero gcc **warning** count is reported on its own line. That is not
+cosmetic: `return;` from a non-void function and an uninitialised local
+(indeterminate in C, zero in nimony) were both found that way, and both were
+invisible while the gate piped gcc into `head -1` — which kills gcc with SIGPIPE
+on its second line of output, so a pile of warnings read as a failed build.
+
+`e2e-all.sh` sweeps `examples/*.nim` plus every `examples/*/` directory whose
+entry point is `main.nim` (multi-module cases: a type, enum, exception or global
+declared in one module and used from another, and module-initialisation order).
+It declares its total, so a missing fixture is a red run rather than a quieter
+green one, and a fixture that stops asserting shows up as `NEWLY VACUOUS`.
 
 `exec` mode emits only the procs (and globals) transitively reachable from the
 entry, so the nimony bootstrap (`ini`/`main`/`cmdCount` and its cross-module
@@ -126,11 +154,19 @@ The cleanest self-owned native compiler reuses the one component that is
 genuinely hard to rebuild — hexer's lowering — and owns everything else:
 `nifparser` + `nifsem` → `hexer` → **aowlc** → `gcc`.
 
-## Test
+## Layout is cross-checked against aowlabi
 
-```sh
-npm test    # emits C from real hexer .c.nif, gcc-compiles, runs, asserts results
-```
+[`aowlabi`](https://github.com/aoughwl/aowlabi) states the canonical ABI for the
+stack, and its `tests/cbackend.sh` diffs that model against `sizeof`/`offsetof`
+applied by **gcc to the C this repo emits** — padding, object variants (an
+anonymous union), `{.packed.}`, `{.union.}`, a three-deep inheritance chain, sets,
+refs, proc fields, ranges, distinct and empty fields, plus the runtime `string`,
+`LongString` and `seq` headers. Run it from an aowlabi checkout; it skips itself,
+with a line, when there is no aowlc to measure.
+
+That tier found `{.packed.}` being dropped here entirely — a packed object was 24
+bytes against nimony's 10, with every field after the first at a different
+offset. It compiled, it ran, and it disagreed with the compiler about layout.
 
 ## License
 
