@@ -1617,6 +1617,17 @@ proc emitUnit(parts: Classified): string =
   var data: seq[string] = @[]
   var inits: seq[string] = @[]
   for g in globals:
+    # An `{.importc.}` global is DEFINED elsewhere — correct not to define it
+    # here — but C still needs a DECLARATION to reference it, and emitting
+    # nothing at all left the reference undeclared. std/os declares `cmdCount`
+    # that way and `paramCount`/`paramStr` read it, so any program calling either
+    # failed to compile with "'cmdCount' undeclared". A `{.header.}` global comes
+    # in via its #include, and `{.nodecl.}` asks for nothing, so only importc
+    # needs this.
+    if hasPragma(g.kids[1], ["importc", "importcpp"]) and
+       not hasPragma(g.kids[1], ["nodecl", "header"]):
+      stubs.add "extern " & declare(g.kids[2], declName(g.kids[0].atom, g.kids[1])) & ";"
+      continue
     if hasPragma(g.kids[1], ["nodecl", "importc", "importcpp", "header"]): continue
     let info = genGlobal(g)
     data.add info.decl
