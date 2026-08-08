@@ -13,7 +13,7 @@
 ## why every existing fixture missed it: they all converted locally. So the
 ## declarations below must stay at module level to mean anything.
 ##
-## Found while extending aowllib's corpus, where it took out the whole
+## Found while extending aowlrt's corpus, where it took out the whole
 ## translation unit.
 import std/syncio
 

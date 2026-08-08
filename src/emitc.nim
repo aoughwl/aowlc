@@ -710,7 +710,7 @@ proc genExpr(e: Node): string =
     # The same code inside a proc compiles either way, which is why this stayed
     # invisible: every existing fixture converted at LOCAL scope.
     #
-    # Found while extending aowllib: `type Name = distinct string` plus a
+    # Found while extending aowlrt: `type Name = distinct string` plus a
     # top-level `var n = Name("…")` lowers to (conv string (oconstr string …)),
     # and the whole translation unit failed to compile.
     if (t == "conv" or t == "hconv") and isList(operand) and

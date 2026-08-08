@@ -11,9 +11,9 @@
 // So compare the text. They are meant to be the same prelude, and the moment
 // they are not, the difference is a fact about aowlc that nobody decided.
 //
-// A THIRD copy lives in aowllib.h ("mirror aowlc's PRELUDE") — that one is
+// A THIRD copy lives in aowlrt.h ("mirror aowlc's PRELUDE") — that one is
 // deliberately a subset and is gated separately, by compiling it together with
-// this prelude in both include orders (aowlabi/tests/aowllib.sh).
+// this prelude in both include orders (aowlabi/tests/aowlrt.sh).
 "use strict";
 const fs = require("fs");
 const path = require("path");
