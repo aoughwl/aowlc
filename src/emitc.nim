@@ -399,6 +399,11 @@ var externVals: seq[string] = @[]
 var typeExternKeys: seq[string] = @[]
 var typeExternVals: seq[string] = @[]
 var noDeclTypes: seq[string] = @[]
+# Symbols that ARE an address constant when named bare in an expression: a proc
+# (function designator) and a global whose C declarator is an array (it decays to
+# a pointer). Every other bare symbol is an lvalue read, which is not a constant
+# expression and so cannot stand in a file-scope initializer. See isLiteralNode.
+var addrConstSyms: seq[string] = @[]
 
 # cross-module resolution state: sibling `.c.nif` modules loaded on demand so we
 # can emit correct `extern` prototypes / type declarations for foreign symbols.
@@ -420,6 +425,7 @@ proc resetEmitter() =
   typeExternKeys = @[]
   typeExternVals = @[]
   noDeclTypes = @[]
+  addrConstSyms = @[]
   ownMod = prog.main.name
   loadedMods = @[]
   siblingSuffixes = @[]
@@ -1041,16 +1047,38 @@ proc genProc(p: Node): string =
 # ---------------------------------------------------------------------------
 # literal-node check (for deciding inline global initializers)
 # ---------------------------------------------------------------------------
+# Does `v` print as a C CONSTANT EXPRESSION -- the only thing the initializer of
+# an object with static storage duration may be (C11 6.7.9/4)? Anything this says
+# no to is deferred into `aowlc_init` instead.
 proc isLiteralNode(v: Node): bool =
   if v == nil: return false
   if v.kind == nkStr or v.kind == nkChar: return true
   if isAtom(v):
     let a = v.atom
-    return a == "." or a == "true" or a == "false" or a == "nil" or
-      isIntLit(a) or isUIntLit(a) or isFloatLit(a)
+    if a == "." or a == "true" or a == "false" or a == "nil" or
+       isIntLit(a) or isUIntLit(a) or isFloatLit(a): return true
+    # A bare SYMBOL: constant only where it decays to an address -- a proc name
+    # or an array global, as in a vtable's `((void*)destroyProc)` and
+    # `((NU32*)Obj_dy)`. Reading a scalar global is not a constant expression.
+    return oneOf(a, addrConstSyms)
   if isList(v):
-    if oneOf(v.tag, ["suf", "true", "false", "nil", "inf", "neginf", "nan", "cast", "conv"]):
+    if oneOf(v.tag, ["true", "false", "nil", "inf", "neginf", "nan"]):
       return true
+    # A cast/conversion/suffix is a constant expression only if WHAT IT WRAPS is.
+    # The tag alone used to say "literal", and hexer spells every `{.dynlib.}`
+    # proc as `(cast <proctype> (call nimGetProcAddr Dl_... "Name"))` -- a CALL,
+    # which is never constant. So each one landed in a file-scope initializer and
+    # gcc rejected it with "initializer element is not constant": 19 of them in
+    # one Windows FFI program, one per imported entry point.
+    if oneOf(v.tag, ["cast", "conv", "suf"]):
+      return v.kids.len > 0 and isLiteralNode(v.kids[v.kids.len - 1])
+    # `&x` for a symbol x: the address of an object with static storage IS an
+    # address constant (C11 6.6/9), and at file scope every symbol is one. hexer
+    # spells a string too long for the inline byte field as
+    # `(oconstr string (kv bytes ...) (kv more (addr strlit...)))`, so without
+    # this no `const` array of long strings could be initialised statically.
+    if v.tag == "addr":
+      return v.kids.len >= 1 and isAtom(v.kids[0]) and not isDot(v.kids[0])
     if v.tag == "aconstr" or v.tag == "oconstr":
       var i = 1
       while i < v.kids.len:
@@ -1237,6 +1265,7 @@ proc buildExternMaps(procs, globals, types: seq[Node]) =
     elif hasPragma(pp.pragmas, ["importc", "exportc", "importcpp"]):
       externKeys.add pp.nameAtom.atom
       externVals.add beforeDot(pp.nameAtom.atom)
+    addrConstSyms.add pp.nameAtom.atom          # function designator
   for g in globals:
     let nameAtom = g.kids[0]
     let pragmas = g.kids[1]
@@ -1244,6 +1273,12 @@ proc buildExternMaps(procs, globals, types: seq[Node]) =
     if ext.len > 0:
       externKeys.add nameAtom.atom
       externVals.add ext
+    # An array-typed global decays; anything else read by name does not. Ask the
+    # declarator itself rather than the type tag, so a typedef'd array (which
+    # aowlc wraps in a struct, and which therefore does NOT decay) says no.
+    if g.kids.len > 2:
+      let d = declare(g.kids[2], nameAtom.atom)
+      if d.len > 0 and d[d.len - 1] == ']': addrConstSyms.add nameAtom.atom
   for td in types:
     let nameAtom = td.kids[0]
     let pragmas = findTag(td, "pragmas")

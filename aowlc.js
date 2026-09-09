@@ -181,6 +181,11 @@ class Emitter {
     this.typeExtern = new Map();    // type symbol name -> extern C name
     this.noDeclType = new Set();    // type symbols with importc/nodecl -> emit no decl
     this.typeBody = new Map();      // type symbol name -> body node
+    // Symbols that, named bare in an expression, ARE an address constant and so
+    // may appear in a file-scope initializer: a proc (function designator) and a
+    // global whose C declaration is an array (decays to a pointer). Every other
+    // bare symbol is an lvalue read, which is not constant. See isLiteralNode.
+    this.addrConstSyms = new Set();
   }
 
   // --- pragma helpers -------------------------------------------------------
@@ -743,18 +748,45 @@ function paramType(paramNode) {
   }
   return paramNode.kids[2];
 }
-function isLiteralNode(v) {
+// Does `v` print as a C CONSTANT EXPRESSION — the only thing the initializer of
+// an object with static storage duration may be (C11 6.7.9/4)? `addrConst` names
+// the symbols that are an address constant when named bare: procs, and globals
+// whose declarator is an array. Everything this says no to is deferred into
+// `aowlc_init` instead.
+function isLiteralNode(v, addrConst) {
   if (v === undefined) return false;
   if (v.str !== undefined || v.chr !== undefined) return true;
   if (isAtom(v)) {
     const a = v.atom;
-    return a === "." || a === "true" || a === "false" || a === "nil" ||
-      isIntLit(a) || isUIntLit(a) || isFloatLit(a);
+    if (a === "." || a === "true" || a === "false" || a === "nil" ||
+        isIntLit(a) || isUIntLit(a) || isFloatLit(a)) return true;
+    // A bare SYMBOL: constant only where it decays to an address — a proc name
+    // or an array global, as in a vtable's `((void*)destroyProc)` and
+    // `((NU32*)Obj_dy)`. Reading a scalar global is not a constant expression.
+    return addrConst !== undefined && addrConst.has(a);
   }
   if (isList(v)) {
-    if (["suf", "true", "false", "nil", "inf", "neginf", "nan", "cast", "conv"].includes(v.tag)) return true;
+    if (["true", "false", "nil", "inf", "neginf", "nan"].includes(v.tag)) return true;
+    // A cast/conversion/suffix is a constant expression only if WHAT IT WRAPS
+    // is. The tag alone used to say "literal", and hexer spells every
+    // `{.dynlib.}` proc as `(cast <proctype> (call nimGetProcAddr Dl_… "Name"))`
+    // — a CALL, which is never a constant expression. So each one landed in a
+    // file-scope initializer and gcc rejected it with "initializer element is
+    // not constant": 19 of them in one Windows FFI program, one per imported
+    // entry point. Recursing defers exactly those to `aowlc_init` and leaves
+    // `(cast (i 64) 3)` static, as before.
+    if (["cast", "conv", "suf"].includes(v.tag))
+      return v.kids.length > 0 && isLiteralNode(v.kids[v.kids.length - 1], addrConst);
+    // `&x` for a symbol x: the address of an object with static storage IS an
+    // address constant (C11 6.6/9), and at file scope every symbol is one. hexer
+    // spells a string too long for the inline byte field as
+    // `(oconstr string (kv bytes …) (kv more (addr strlit…)))`, so without this
+    // no `const` array of long strings could be initialised statically.
+    if (v.tag === "addr")
+      return v.kids.length >= 1 && isAtom(v.kids[0]) && !isDot(v.kids[0]);
     if (v.tag === "aconstr" || v.tag === "oconstr") {
-      return v.kids.slice(1).every((k) => (isList(k) && k.tag === "kv" ? isLiteralNode(k.kids[1]) : isLiteralNode(k)));
+      return v.kids.slice(1).every((k) => (isList(k) && k.tag === "kv"
+        ? isLiteralNode(k.kids[1], addrConst) : isLiteralNode(k, addrConst)));
     }
   }
   return false;
@@ -918,11 +950,18 @@ function buildExternMaps(em, procs, globals, types) {
     if (ext) em.externOfSym.set(parts.nameAtom.atom, ext);
     else if (em.hasPragma(parts.pragmas, ["importc", "exportc", "importcpp"]))
       em.externOfSym.set(parts.nameAtom.atom, parts.nameAtom.atom.split(".")[0]);
+    em.addrConstSyms.add(parts.nameAtom.atom);        // function designator
   }
   for (const g of globals) {
     const nameAtom = g.kids[0], pragmas = g.kids[1];
     const ext = em.externName(pragmas);
     if (ext) em.externOfSym.set(nameAtom.atom, ext);
+    // An array-typed global decays; anything else read by name does not. Ask the
+    // declarator itself rather than the type tag, so a typedef'd array (which
+    // aowlc wraps in a struct, and which therefore does NOT decay) says no.
+    try {
+      if (/\]$/.test(em.declare(g.kids[2], nameAtom.atom))) em.addrConstSyms.add(nameAtom.atom);
+    } catch (e) { /* an undeclarable type is simply not an address constant */ }
   }
   for (const td of types) {
     const nameAtom = td.kids[0];
