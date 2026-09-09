@@ -1216,13 +1216,32 @@ proc provisionImpl(name: string): string =
   # libc-backed definition, so give them internal linkage to avoid clashes at link.
   if name == "mi_malloc": return "static void* mi_malloc(NU n) { return malloc((size_t)n); }"
   elif name == "mi_free": return "static void mi_free(void* p) { free(p); }"
+  elif name == "mi_calloc": return "static void* mi_calloc(NU n, NU sz) { return calloc((size_t)n, (size_t)sz); }"
   elif name == "mi_realloc": return "static void* mi_realloc(void* p, NU n) { return realloc(p, (size_t)n); }"
-  elif name == "mi_usable_size": return "static NU mi_usable_size(void* p) { return (NU)malloc_usable_size(p); }"
+  # `malloc_usable_size` is a GLIBC extension: it does not exist on Windows
+  # (where the CRT spells it `_msize`) or on macOS (`malloc_size`, and there is
+  # no <malloc.h> at all). Naming it unconditionally made every program that
+  # grows a seq or a string fail to compile on Windows with "implicit
+  # declaration of function 'malloc_usable_size'" -- an error, not a warning,
+  # under gcc 14's C23 default. The header goes in the body so the `#include` is
+  # under the same `#if` as the call it is for.
+  elif name == "mi_usable_size":
+    return "#if defined(_WIN32)\n" &
+      "#  include <malloc.h>\n" &
+      "static NU mi_usable_size(void* p) { return (NU)_msize(p); }\n" &
+      "#elif defined(__APPLE__)\n" &
+      "#  include <malloc/malloc.h>\n" &
+      "static NU mi_usable_size(void* p) { return (NU)malloc_size(p); }\n" &
+      "#else\n" &
+      "#  include <malloc.h>\n" &
+      "static NU mi_usable_size(void* p) { return (NU)malloc_usable_size(p); }\n" &
+      "#endif"
   return ""
 
 proc provisionNeeds(name: string): string =
-  if name == "mi_usable_size": return "<malloc.h>"
-  elif name == "mi_malloc" or name == "mi_free" or name == "mi_realloc": return "<stdlib.h>"
+  if name == "mi_usable_size": return ""     # its #includes are inside the body
+  elif name == "mi_malloc" or name == "mi_free" or name == "mi_realloc" or
+       name == "mi_calloc": return "<stdlib.h>"
   return ""
 
 proc isProvision(name: string): bool = provisionImpl(name).len > 0

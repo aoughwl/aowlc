@@ -1219,8 +1219,26 @@ function compileProgram(mods, opts = {}) {
 const RUNTIME_PROVISIONS = {
   mi_malloc:      { needs: ["<stdlib.h>"], impl: "void* mi_malloc(NU n) { return malloc((size_t)n); }" },
   mi_free:        { needs: ["<stdlib.h>"], impl: "void mi_free(void* p) { free(p); }" },
+  mi_calloc:      { needs: ["<stdlib.h>"], impl: "void* mi_calloc(NU n, NU sz) { return calloc((size_t)n, (size_t)sz); }" },
   mi_realloc:     { needs: ["<stdlib.h>"], impl: "void* mi_realloc(void* p, NU n) { return realloc(p, (size_t)n); }" },
-  mi_usable_size: { needs: ["<malloc.h>"], impl: "NU mi_usable_size(void* p) { return (NU)malloc_usable_size(p); }" },
+  // `malloc_usable_size` is a GLIBC extension: it does not exist on Windows
+  // (where the CRT spells it `_msize`) or on macOS (`malloc_size`, and there is
+  // no <malloc.h> at all). Naming it unconditionally made every program that
+  // grows a seq or a string fail to compile on Windows with "implicit
+  // declaration of function 'malloc_usable_size'" — an error, not a warning,
+  // under gcc 14's C23 default. The header goes in the body so the `#include`
+  // is under the same `#if` as the call it is for.
+  mi_usable_size: { needs: [], impl:
+    "#if defined(_WIN32)\n" +
+    "#  include <malloc.h>\n" +
+    "NU mi_usable_size(void* p) { return (NU)_msize(p); }\n" +
+    "#elif defined(__APPLE__)\n" +
+    "#  include <malloc/malloc.h>\n" +
+    "NU mi_usable_size(void* p) { return (NU)malloc_size(p); }\n" +
+    "#else\n" +
+    "#  include <malloc.h>\n" +
+    "NU mi_usable_size(void* p) { return (NU)malloc_usable_size(p); }\n" +
+    "#endif" },
 };
 
 // Emit a C translation unit from already-classified {procs,globals,types,topStmts}.
