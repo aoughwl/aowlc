@@ -156,6 +156,30 @@ npm test                                # exec-mode entry points + whole-program
 bash test/cnif-fresh.sh                 # the committed .c.nif still match their .nim
 bash ~/aifjs/tests/cross.sh --sample 6  # this corpus through aowljs, and its through ours
 bash test/driver.sh examples/hello.nim  # the DRIVER (build + exec), not the raw printer
+```
+
+`twoprinters.sh` is the load-bearing one, and what it costs decides how often
+anyone runs it. Measured on 2026-09-09, Windows, `J=8`:
+
+| | wall | oracle from cache |
+|---|---|---|
+| cold (`NOCACHE=1`, or after a nimony rebuild) | **976s** | 0/78 |
+| warm — any run where only `aowlc` changed | **42s** | 78/78 |
+
+Both print the same `68/68`. Treat the cold number as an upper bound: nimony's
+compiles take a machine-wide lock, and this one was measured with another
+session compiling against the same lock. The ratio is the durable part. The cold number is nimony's own compiles, which
+serialise on the machine-wide lock and so do NOT parallelise; the cache is the
+whole win, and it is safe to lean on because nimony's answer is an ORACLE —
+independent of aowlc — and the key covers the fixture's sources *and* the
+toolchain (`~/nimony/bin/*`, everything under `~/nimony/lib`). Edit aowlc, get
+42s. Rebuild nimony, pay the 976s once. Both printers always re-run either way;
+nothing about the comparison is cached.
+
+`ONLY=<substring>` narrows the run to one fixture while iterating. It announces
+itself as a PARTIAL RUN twice, and is not the gate.
+
+```sh
 bash test/single.sh examples/hello.nim  # one TU alone vs all modules — separates a
                                         # codegen bug from a whole-module-emission one
 ```
@@ -225,7 +249,19 @@ where nimony says 42 — and fixing `emitc.nim` left `aowlc.js` still wrong.
 
 `test/twoprinters.sh` runs the corpus through both and compares each against
 **nimony's** output, not against each other, so it says which one is wrong.
-**73/73 agree in both**, and its `KNOWN_JS_BEHIND` list is empty. It covers the multi-module fixtures (`examples/<d>/main.nim`) as well as the single-module ones — the case that hid the own-module-suffix bug, since in a single-module program every use is unsuffixed too.
+As measured on 2026-09-09 (Windows, gcc 15.2, `bash test/twoprinters.sh`, full
+run, cache bypassed): **68/68 agree in both**, out of 78 examples, 10 of which
+are skipped for having no output to compare — nimony itself does not compile
+them, so there is no oracle to score against. The `KNOWN_JS_BEHIND` list is
+empty. It covers the multi-module fixtures (`examples/<d>/main.nim`) as well as
+the single-module ones — the case that hid the own-module-suffix bug, since in
+a single-module program every use is unsuffixed too.
+
+That number is the one the script prints. It is quoted here because it was
+measured, not because it sounds finished — this README claimed **73/73** for
+several commits while the script's own output said 66/67, and nobody caught it
+because nobody re-ran the gate that says so. If you change this line, run the
+gate and paste what it printed.
 
 It did not start there. The gate opened with three entries, each a fix that had
 landed in the nimony printer and not the JavaScript one, and a fourth turned up
@@ -237,7 +273,8 @@ by emitting aowlabi's layout corpus through both:
 | `{.packed.}` | dropped it (24 bytes where nimony says 10) | `__attribute__((packed))` |
 | octal escapes | unpadded, so `"\n7"` → `\12`+`7` → C reads `\127` = `W` | three digits |
 | non-ASCII | walked CODE POINTS, `é` → one escape | walk BYTES |
-| distinct global | `((T)(T){…})` — a cast is not a constant initializer | drop the cast |
+| distinct global | `((T)(T){…})` — a cast is not a constant initializer | drop the cast, but ONLY around a constructor of that same type (see below) |
+| `except T as e` | dropped the cast on EVERY conversion, so the binding initialised a `T*` from an `Exception*` | keep the cast — nimony's own backend never unwraps one |
 
 Every one was reported as a **stale exemption** the moment it started agreeing,
 which is the only reason a known-divergence list is safe to keep: it cannot
@@ -253,6 +290,15 @@ run: the nimony printer suppressed twelve warnings the JavaScript one did not
 (`-Wimplicit-function-declaration`, `-Wincompatible-pointer-types`, `-Wmain`,
 `-Wreturn-type` and nine more), a difference nobody had decided. They agree now
 at 55 lines.
+
+They agree at 55 lines *on Windows too*, which was not previously true and was
+not previously visible. A JS template literal normalises CRLF to LF by the
+language spec, while `readFileSync` returns what the checkout wrote, so on any
+`core.autocrlf=true` clone every line of `emitc.nim`'s prelude carried a
+trailing `\r`, no line matched, and this gate was red for the same 55 lines it
+called green on Linux. `npm test` chains with `&&`, so `test.js` never ran at
+all on such a checkout — any Windows "21/24" quoted before this was measured by
+hand, not by `npm test`. `norm` now strips `\r`.
 
 That suppression list turned out to be the next problem. `e2e.sh` compiles with
 `-Wall -Wextra` and its comment says so — but an in-file `#pragma GCC diagnostic

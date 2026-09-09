@@ -6,3 +6,4 @@ a.out
 /tmp-*/
 nimcache/
 bin/aowlc-native
+bin/aowlc-native.exe
