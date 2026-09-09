@@ -92,7 +92,8 @@ node bin/aowlc link <nimcache>/<main>/*.c.nif --emit-only -o /tmp/program.c
 ### The single-TU limits differ per printer
 
 `bin/aowlc-native` emits a self-contained TU for any module (`test/single-all.sh`,
-**78/78** as measured on 2026-09-09; the corpus grew and this line still said
+**78/78**, re-run 2026-09-09 on Windows — `aowlc single-TU: 78/78 emit a
+self-contained translation unit`, 20m22s; the corpus grew and this line once said
 77/77): it reads through nifreader, whose index lets it follow an imported symbol
 into its owning module and re-emit the type body.
 
@@ -157,7 +158,18 @@ npm test                                # exec-mode entry points + whole-program
 bash test/cnif-fresh.sh                 # the committed .c.nif still match their .nim
 bash ~/aifjs/tests/cross.sh --sample 6  # this corpus through aowljs, and its through ours
 bash test/driver.sh examples/hello.nim  # the DRIVER (build + exec), not the raw printer
+bash test/claims.sh                     # do the NUMBERS below still agree with the gates?
 ```
+
+`test/claims.sh` is the one gate that reads this file. Every number below
+has a row in [`CLAIMS.tsv`](CLAIMS.tsv) naming the command that printed it,
+and the script re-runs or re-reads that command and reports every
+disagreement. It exists because two numbers in this README were wrong for
+commits at a time — `73/73` for twoprinters, which printed `66/67`, and
+`77/77` for `single-all.sh`, which prints `78/78` — and no gate could see
+either, because no gate read prose. Cheap by default: it checks the
+DENOMINATORS, which is what drifted both times. `--all` runs the real gates.
+It reports and never rewrites; a number nobody measured is not one to guess at.
 
 `twoprinters.sh` is the load-bearing one, and what it costs decides how often
 anyone runs it. Measured on 2026-09-09, Windows, `J=8`:
@@ -251,7 +263,8 @@ where nimony says 42 — and fixing `emitc.nim` left `aowlc.js` still wrong.
 `test/twoprinters.sh` runs the corpus through both and compares each against
 **nimony's** output, not against each other, so it says which one is wrong.
 As measured on 2026-09-09 (Windows, gcc 15.2, `bash test/twoprinters.sh`, full
-run, cache bypassed): **68/68 agree in both**, out of 78 examples, 10 of which
+run; re-run the same day warm, 40s, `78/78 oracle results from the cache`, same
+answer): **68/68 agree in both**, out of 78 examples, 10 of which
 are skipped for having no output to compare — nimony itself does not compile
 them, so there is no oracle to score against. The `KNOWN_JS_BEHIND` list is
 empty. It covers the multi-module fixtures (`examples/<d>/main.nim`) as well as

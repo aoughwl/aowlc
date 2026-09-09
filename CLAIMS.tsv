@@ -1,0 +1,49 @@
+# CLAIMS.tsv -- every number this README states, and the command that printed it.
+#
+# Read tools/claimcheck.py's header for why this file exists. The short version:
+# this README once said twoprinters was 73/73 while the script printed 66/67, and
+# said 77/77 beside single-all.sh which prints 78/78. Nothing caught either,
+# because no gate read the prose. This file is what a gate reads.
+#
+#   python3 tools/claimcheck.py            # the cheap rows
+#   python3 tools/claimcheck.py --all      # also single-all / twoprinters / e2e-all
+#   python3 tools/claimcheck.py --sweep    # numbers in README.md with no row here
+#
+# Columns:  FILE <TAB> ANCHOR <TAB> CLASS <TAB> NUMBER <TAB> SOURCE <TAB> EXTRACT <TAB> GUARD
+#
+# The cheap rows are deliberately the DENOMINATORS. A numerator needs the whole
+# gate; a denominator is `ls`. Both of this repo's real defects were denominator
+# drift -- the corpus grew from 77 to 78 and the prose did not follow -- so the
+# rows that cost a second are the ones that would have caught them.
+README.md	out of 78 examples, 10 of which	GATE	78	bash -c 'n=$(ls examples/*.nim | wc -l); m=$(for d in examples/*/; do [ -f "$d/main.nim" ] && echo x; done | wc -l); echo "corpus=$((n+m))"'	corpus=(\d+)
+README.md	**78/78**, re-run 2026-09-09 on Windows	EXPENSIVE	78/78	bash test/single-all.sh	^aowlc single-TU: (\d+/\d+) emit
+README.md	Both print the same `68/68`	EXPENSIVE	68/68	bash test/twoprinters.sh	^aowlc two-printer: (\d+/\d+) agree
+README.md	**68/68 agree in both**	EXPENSIVE	68/68	bash test/twoprinters.sh	^aowlc two-printer: (\d+/\d+) agree
+README.md	at 55 lines *on Windows too*	GATE	55 lines	node test/prelude.js	agree, (\d+ lines)
+README.md	77/77 clean under the enforced set.	EXPENSIVE	77/77	bash test/e2e-all.sh	^aowlc e2e: (\d+/\d+) compared
+README.md	(**native 26/26, js 26/26**)	EXPENSIVE	26/26	bash ~/aowlabi/tests/cbackend.sh	native\D{0,40}(\d+/\d+)
+README.md	| **976s** | 0/78 |	HISTORICAL	976s	a wall-clock reading, Windows, J=8, 2026-09-09, measured with another session holding the same nimony lock. The README says so in the paragraph under the table. A timing is not reproducible across machines or contention and must never be silently refreshed.
+README.md	| **42s** | 78/78 |	HISTORICAL	42s	same reading as the 976s row; see that row.
+README.md	claimed **73/73** for	HISTORICAL	73/73	the retraction narrative. 73/73 is the WRONG number being recorded as wrong. Updating it would erase the lesson.
+README.md	the script's own output said 66/67	HISTORICAL	66/67	the retraction narrative; what the gate actually printed at the time. Not a current claim.
+README.md	any Windows "21/24" quoted before this was measured by	HISTORICAL	21/24	a warning about a figure that was hand-measured before npm test could run on Windows at all. Not a current claim. The current npm test score is checked by the row below.
+README.md	**eight of the sixteen pragmas suppress nothing at all**	HISTORICAL	sixteen	a one-off census taken before the stripped-pass was enforced; the README frames it as 'Measured before it was enforced'. The eight are gone from both preludes, so the census cannot be re-run against the tree it describes.
+README.md	`-Woverride-init`, which fires exactly twice	HISTORICAL	twice	counted from one e2e-all warning sweep; the two are named (the {.union.} constructor in examples/e2e_packed.nim). Re-measurable only by rerunning e2e-all and reading its warning lines, which no summary line reports.
+
+# --- the sweep: README.md numbers with no row above are reported ---
+SWEEP	README.md
+# The second statement of the aowlabi layout score, in the "Layout is
+# cross-checked against aowlabi" section. Same gate as the row above; it wraps
+# across two lines, so the sweep sees each half separately.
+IGNORE	README.md	from BOTH printers\*\* \(native 26/26,
+IGNORE	README.md	^js 26/26\), each against the model
+# The 77/77 that this README corrected. Its row is the 78/78 above; the
+# correction's own text names the wrong number, which is the point of it.
+IGNORE	README.md	^77/77\): it reads through nifreader
+# The paragraph that introduces test/claims.sh names the two wrong numbers this
+# whole mechanism exists because of. Naming them is the point; they are not claims.
+IGNORE	README.md	for twoprinters, which printed
+IGNORE	README.md	for `single-all\.sh`, which prints
+# Prose that merely contains digits, not a claim about a gate.
+IGNORE	README.md	^\|
+IGNORE	README.md	1/2/4/8|`\(i 32\)`|NI64|NU32|NF64
