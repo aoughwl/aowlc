@@ -449,15 +449,26 @@ class Emitter {
     if (e !== undefined && isList(e) && (e.tag === "aconstr" || e.tag === "oconstr")) {
       return this.constrBody(e);
     }
-    // A CONVERSION wrapping a constructor is the same problem one level out: a
-    // distinct global emitted `((T)(T){ … })`, and the cast is what stops the
-    // initializer being constant — gcc rejected `who`/`greeting` in
-    // e2e_distinctglobal outright. A distinct/derived conversion is a no-op on
-    // the representation, so the initializer is its value.
+    // A CONVERSION wrapping a CONSTRUCTOR OF THE SAME TYPE is the same problem
+    // one level out: a distinct global emitted `((T)(T){ … })`, and the cast is
+    // what stops the initializer being constant — gcc rejected `who`/`greeting`
+    // in e2e_distinctglobal outright. A distinct/derived conversion is a no-op
+    // on the representation, so the initializer is its value.
+    //
+    // ONLY that case. This used to unwrap every conversion it met, and a
+    // conversion of anything else is not a no-op: hexer binds `except MyError
+    // as e` as `(var :e (ptr MyError) (conv (ptr MyError) err))`, and dropping
+    // the cast initialised a `MyError*` from an `Exception*` — an error, not a
+    // warning, under gcc 14. src/emitc.nim already restricted the unwrap to a
+    // constructor of the target's own type, as nimony's genx keeps the cast;
+    // this is the same rule.
     if (e !== undefined && isList(e) &&
         (e.tag === "conv" || e.tag === "dconv" || e.tag === "hconv") &&
         e.kids.length >= 2) {
-      return this.genInit(e.kids[e.kids.length - 1]);
+      const operand = e.kids[e.kids.length - 1];
+      if (isList(operand) && (operand.tag === "oconstr" || operand.tag === "aconstr") &&
+          operand.kids.length > 0 && this.genType(operand.kids[0]) === this.genType(e.kids[0]))
+        return this.genInit(operand);
     }
     return this.genExpr(e);
   }
