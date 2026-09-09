@@ -1114,8 +1114,14 @@ proc genGlobal(g: Node): GlobalInfo =
   # nimony emits strlit/vtable consts once per owning module and references them
   # cross-module via `extern`. `static` here would hide the definition and break
   # the extern reference at link time (empty/broken binary).
-  if isConst: decl = "const " & decl
+  #
+  # Only when we can initialise it right here, though. A value that is not a C
+  # constant expression is assigned in `aowlc_init` instead, and `const` on the
+  # object being assigned is "assignment of read-only variable" -- a hard error.
+  # The qualifier is a promise about this TU, not part of the ABI or the linkage,
+  # so dropping it on a deferred global costs nothing.
   let hasInit = value != nil and not isDot(value) and isLiteralNode(value)
+  if isConst and hasInit: decl = "const " & decl
   result = default(GlobalInfo)
   result.name = nm
   # INITIALIZER position (see genInit): a file-scope object's initializer must be

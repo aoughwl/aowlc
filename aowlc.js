@@ -634,11 +634,17 @@ class Emitter {
     const nm = this.declName(nameAtom.atom, pragmas);
     const isConst = g.tag === "const";
     let decl = this.declare(type, nm);
+    const hasInit = value !== undefined && !isDot(value) && isLiteralNode(value, this.addrConstSyms);
     // `const` but NOT `static`: a vtable const (`Inh_0_vt_…`) is referenced from
     // every module that constructs the object, so internal linkage makes it
     // unresolvable there. This matches what the native printer emits.
-    if (isConst) decl = "const " + decl;
-    const hasInit = value !== undefined && !isDot(value) && isLiteralNode(value);
+    //
+    // Only when we can initialise it right here, though. A value that is not a C
+    // constant expression is assigned in `aowlc_init` instead, and `const` on the
+    // object being assigned is "assignment of read-only variable" — a hard error.
+    // The qualifier is a promise about this TU, not part of the ABI or the
+    // linkage, so dropping it on a deferred global costs nothing.
+    if (isConst && hasInit) decl = "const " + decl;
     // INITIALIZER position (genInit), same rule at file scope.
     return { name: nm, decl: decl + (hasInit ? " = " + this.genInit(value) : "") + ";",
              nameAtom: nameAtom.atom, needsInit: value !== undefined && !isDot(value) && !hasInit,
