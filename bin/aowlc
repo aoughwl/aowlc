@@ -65,7 +65,12 @@ function baseName(file) {
 function ccCompile(cFile, outBin, opts) {
   const cc = opts.cc || "gcc";
   const optLevel = opts.opt != null ? String(opts.opt) : "2";
-  const args = [cFile, "-O" + optLevel, "-o", outBin, "-lm", "-ldl", "-w"];
+  // -ldl is POSIX-only. On Windows the dynamic-loader entry points (LoadLibrary,
+  // GetProcAddress) live in kernel32, which is linked by default, and there is
+  // no libdl at all — passing it fails the link with "cannot find -ldl".
+  // libm is likewise already part of the mingw CRT.
+  const platformLibs = process.platform === "win32" ? [] : ["-lm", "-ldl"];
+  const args = [cFile, "-O" + optLevel, "-o", outBin, ...platformLibs, "-w"];
   const r = cp.spawnSync(cc, args, { encoding: "utf8" });
   if (r.status !== 0) {
     console.error(r.stderr || r.stdout || "");
