@@ -37,7 +37,15 @@ const nimPrelude = m[1];
 // Compare with trailing whitespace per line normalised away, and nothing else:
 // the two literals sit in different languages, so a stray trailing space is not
 // a divergence anyone should have to look at, while a missing #define is.
-const norm = s => s.replace(/[ \t]+$/gm, "").replace(/\s+$/, "");
+//
+// Line endings count as whitespace here, on purpose. A JS template literal
+// normalises CRLF to LF by the language spec, while readFileSync hands back
+// whatever the checkout wrote, so on a core.autocrlf=true clone (every Windows
+// checkout of this repo) emitc.nim's lines carried a trailing `\r`, no line
+// matched, and this gate was red for the SAME 55 lines it reports green on
+// Linux. `npm test` runs it first, with `&&`, so on such a checkout test.js
+// never ran at all -- a "21/24" measured here was measured by hand.
+const norm = s => s.replace(/\r/g, "").replace(/[ \t]+$/gm, "").replace(/\s+$/, "");
 const a = norm(jsPrelude), b = norm(nimPrelude);
 
 if (a === b) {

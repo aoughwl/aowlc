@@ -59,6 +59,23 @@ function run(file, entry, args) {
   return r.stdout.trim();
 }
 
+// The committed `system` module fixtures (examples/system.c.nif and the one
+// inside each prog_*/ directory) were produced by nimony on LINUX: their
+// `nimLoadLibrary` is dlopen/dlsym under `(header "<dlfcn.h>")`. That is a
+// POSIX program, not a header quirk -- with a stub <dlfcn.h> the syntax-only
+// case passes and both link cases fail on `undefined reference to dlopen`. A
+// Windows gcc has neither, so on win32 these three were permanently red --
+// "fatal error: dlfcn.h: No such file or directory", three times, every run,
+// teaching everyone to read past red. They are SKIPPED here, counted in the
+// denominator, and keyed on the fixture's CONTENT: regenerate it on this
+// platform and the skip retires itself. They are not simply regenerated
+// because that moves the red to Linux -- the Windows system module calls
+// LoadLibraryW -- and a fixture can only be one platform's.
+const POSIX_ONLY_WHY = "Linux-generated fixture: its system module calls dlopen/dlsym, and win32 has no <dlfcn.h>";
+function posixOnly(cnif) {
+  return process.platform === "win32" && require("fs").readFileSync(cnif, "utf8").includes("<dlfcn.h>");
+}
+
 let pass = 0, fail = 0, skipped = 0;
 for (const [file, entry, args, want] of CASES) {
   const label = `${entry}(${args.join(",")})`.padEnd(22);
@@ -86,6 +103,9 @@ for (const file of MODULE_BUILDS) {
   const haveCC = cp.spawnSync(CC, ["--version"], { encoding: "utf8" }).status === 0;
   if (!haveCC || !fs.existsSync(sys)) {
     console.log(`  skip system.c.nif emit+compile (no ${CC} or fixture)`);
+  } else if (posixOnly(sys)) {
+    console.log(`  skip system.c.nif emit+compile (${POSIX_ONLY_WHY})`);
+    skipped++;
   } else {
     const em = cp.spawnSync("node", [AOWLC, "emit", sys], { encoding: "utf8" });
     if (em.status !== 0) { console.log(`  FAIL system.c.nif emit: ${(em.stderr||"").trim()}`); fail++; }
@@ -119,6 +139,11 @@ for (const file of MODULE_BUILDS) {
       skipped++;              // counted, not vanished — see the summary
       continue;
     }
+    if (fs.readdirSync(dir).some((f) => f.endsWith(".c.nif") && posixOnly(path.join(dir, f)))) {
+      console.log(`  skip whole-program link ${name} (${POSIX_ONLY_WHY})`);
+      skipped++;
+      continue;
+    }
     // runtime modules first, the module with `main` last
     const mods = fs.readdirSync(dir).filter((f) => f.endsWith(".c.nif")).map((f) => path.join(dir, f));
     const main = mods.find((f) => fs.readFileSync(f, "utf8").includes('exportc "main"'));
@@ -135,5 +160,5 @@ for (const file of MODULE_BUILDS) {
 // fixture directories turned 24/24 into 22/22 — a smaller run that reads
 // exactly like a clean one. Report the plan and the skips explicitly.
 const plan = pass + fail + skipped;
-console.log(`\n${pass}/${plan} passed` + (skipped ? `, ${skipped} skipped (no cc or fixtures)` : ""));
+console.log(`\n${pass}/${plan} passed` + (skipped ? `, ${skipped} skipped (no cc, no fixtures, or a POSIX-only fixture on win32)` : ""));
 process.exit(fail ? 1 : 0);
