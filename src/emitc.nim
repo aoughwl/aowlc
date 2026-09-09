@@ -535,12 +535,18 @@ proc paramType(paramNode: Node): Node =
 # ---------------------------------------------------------------------------
 # types
 # ---------------------------------------------------------------------------
+# The width is the FIRST numeric child, not the last. A sized type can carry
+# pragmas after it -- winlean's DWORD is `(u 32 (importc "DWORD") (header
+# "<WinDef.h>"))` -- and reading the LAST child found a `(header ...)` list
+# instead of a number, so every pragma-carrying sized type silently widened to
+# the unsuffixed NI/NU (64 bits). That put 16-byte FILETIMEs in WIN32_FIND_DATA,
+# pushing `cFileName` 24 bytes past where the OS writes it, so every directory
+# entry came back with an empty name.
 proc bitsOf(t: Node): string =
-  if t.kids.len == 0: return ""
-  let last = t.kids[t.kids.len - 1]
-  if isAtom(last) and isIntLit(last.atom):
-    if last.atom == "-1": return ""
-    return last.atom
+  for k in t.kids:
+    if isAtom(k) and isIntLit(k.atom):
+      if k.atom == "-1": return ""
+      return k.atom
   return ""
 
 proc genProcTypePtr(t: Node): string =

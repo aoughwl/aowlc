@@ -225,9 +225,15 @@ class Emitter {
 
   // --- types ----------------------------------------------------------------
   bitsOf(t) {
-    const last = t.kids.length ? t.kids[t.kids.length - 1] : null;
-    if (isAtom(last) && /^-?\d+$/.test(last.atom)) {
-      return last.atom === "-1" ? "" : last.atom;
+    // The width is the FIRST numeric child, not the last. A sized type can carry
+    // pragmas after it -- winlean's DWORD is `(u 32 (importc "DWORD") (header
+    // "<WinDef.h>"))` -- and reading the LAST child found a `(header …)` list
+    // instead of a number, so every pragma-carrying sized type silently widened
+    // to the unsuffixed NI/NU (64 bits). That put 16-byte FILETIMEs in
+    // WIN32_FIND_DATA, pushing `cFileName` 24 bytes past where the OS writes it,
+    // so every directory entry came back with an empty name.
+    for (const k of t.kids) {
+      if (isAtom(k) && /^-?\d+$/.test(k.atom)) return k.atom === "-1" ? "" : k.atom;
     }
     return "";
   }
