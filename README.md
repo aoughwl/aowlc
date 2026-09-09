@@ -92,6 +92,7 @@ node bin/aowlc link <nimcache>/<main>/*.c.nif --emit-only -o /tmp/program.c
 ### The single-TU limits differ per printer
 
 `bin/aowlc-native` emits a self-contained TU for any module (`test/single-all.sh`,
+**78/78** as measured on 2026-09-09; the corpus grew and this line still said
 77/77): it reads through nifreader, whose index lets it follow an imported symbol
 into its owning module and re-emit the type body.
 
