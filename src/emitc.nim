@@ -250,14 +250,21 @@ proc genIntLit(a: string): string =
   if v >= -2147483648'i64 and v <= 2147483647'i64: return $v
   return $v & "LL"
 
+# ALWAYS `ull`. A nif `u` literal has the IR's 64-bit unsigned type, and C's
+# plain `u` suffix is `unsigned int` -- 32 bits. That difference is invisible in
+# a value that fits, and lethal the moment the literal is an operand of a bit
+# operation: `~255u` is 0x00000000FFFFFF00, not 0xFFFFFFFFFFFFFF00, so system's
+# SWAR string padding masked away the string's LAST BYTE. Every Windows path then
+# reached the OS one character short -- `newWideCString` turned "tree" into "tre"
+# and the whole winlean layer failed silently. nimony's own C generator spells
+# these `ull` for the same reason; a narrower target is served by the cast the
+# surrounding node already prints.
 proc genUIntLit(a: string): string =
   var n = a.len
   while n > 0 and (a[n-1] == 'l' or a[n-1] == 'L'): dec n
   if n > 0 and (a[n-1] == 'u' or a[n-1] == 'U'): dec n
   let digits = a[0 ..< n]
-  let v = parseU64(digits)
-  if v <= 4294967295'u64: return $v & "u"
-  return $v & "ull"
+  return $parseU64(digits) & "ull"
 
 # ---------------------------------------------------------------------------
 # name mangling (faithful port of lengc/mangler.nim mangleToC)

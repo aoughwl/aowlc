@@ -160,9 +160,17 @@ function genIntLit(a) {
   return v.toString() + "LL";
 }
 function genUIntLit(a) {
+  // ALWAYS `ull`. A nif `u` literal has the IR's 64-bit unsigned type, and C's
+  // plain `u` suffix is `unsigned int` -- 32 bits. That difference is invisible
+  // in a value that fits, and lethal the moment the literal is an operand of a
+  // bit operation: `~255u` is 0x00000000FFFFFF00, not 0xFFFFFFFFFFFFFF00, so
+  // system's SWAR string padding masked away the string's LAST BYTE. Every
+  // Windows path then reached the OS one character short -- `newWideCString`
+  // turned "tree" into "tre" and the whole winlean layer failed silently.
+  // nimony's own C generator spells these `ull` for the same reason; a narrower
+  // target is served by the cast the surrounding node already prints.
   const digits = a.replace(/u(ll|l)?$/, "");
-  const v = BigInt(digits);
-  return v <= 4294967295n ? v.toString() + "u" : v.toString() + "ull";
+  return BigInt(digits).toString() + "ull";
 }
 
 // ----------------------------------------------------------------------------
