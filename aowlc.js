@@ -149,15 +149,26 @@ const isIntLit   = (a) => /^-?\d+$/.test(a);
 const isUIntLit  = (a) => /^\d+u(ll|l)?$/.test(a);
 const isFloatLit = (a) => /^-?(\d+\.\d*|\.\d+|\d+)(e[-+]?\d+)?$/i.test(a) && /[.e]/i.test(a);
 
-const INT32_MIN = -2147483648, INT32_MAX = 2147483647;
 const INT64_MIN = "-9223372036854775808";
+// ALWAYS `IL64(...)`, which the prelude spells `x##LL`. This is genUIntLit's
+// SIGNED counterpart and it was left standing when that one was fixed: a value
+// that fits in 32 bits was emitted BARE, and C types a bare integer literal as
+// `int`. The cast the surrounding node prints wraps the RESULT, which is too
+// late -- `(shl (i 64) 1 40)` came out `((NI64)(1 << 40))`, a shift past the
+// width of `int` and undefined behaviour. On x86 it answers 1 << (40 & 31) =
+// 256 where nimony says 1099511627776. Shift is the one binary operator whose
+// wide RIGHT operand cannot widen the left, which is why every other arithmetic
+// node hid this: in `a + 255` the NI64 `a` already promotes the literal.
+// nimony's own genIntLit takes exactly this branch for every value once its
+// target `bits` is 64, and aowlc's prelude hardcodes NIM_INTBITS 64, so there
+// is no other branch to take here. (If aowlc ever grows lengc's `--bits:32`,
+// the narrow `$i` arm comes back, gated on that setting and not on the value.)
 function genIntLit(a) {
-  // BigInt so 64-bit literals survive. In C, values outside int range need LL.
+  // BigInt so 64-bit literals survive.
   let v;
   try { v = BigInt(a); } catch (_) { return a; }
-  if (v >= BigInt(INT32_MIN) && v <= BigInt(INT32_MAX)) return v.toString();
-  if (a === INT64_MIN) return "(-9223372036854775807LL - 1LL)";
-  return v.toString() + "LL";
+  if (a === INT64_MIN) return "(IL64(-9223372036854775807) - IL64(1))";
+  return "IL64(" + v.toString() + ")";
 }
 function genUIntLit(a) {
   // ALWAYS `ull`. A nif `u` literal has the IR's 64-bit unsigned type, and C's
