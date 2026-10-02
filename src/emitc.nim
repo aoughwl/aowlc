@@ -437,6 +437,22 @@ var modTypeKeys: seq[string] = @[]
 var modTypeVals: seq[Node] = @[]
 var checkedSuffixes: seq[string] = @[]   # suffixes already PROBED on disk
 
+# --- server-split (defense): procs whose BODY must NOT be emitted; they run server-side.
+# Inert unless populated (via setSplitProcs, from aowlc's --split flag). When a proc is in
+# this set, genProc emits an RPC stub in place of its body, so the real body is never
+# generated and the IP is absent from the binary. The set is global build config (the split
+# plan from defense's partition.nim + select.nim), not per-module state, so resetEmitter
+# does not clear it.
+var splitProcs: seq[string] = @[]
+
+proc setSplitProcs*(names: seq[string]) =
+  splitProcs = names
+
+proc inServerSet(name: string): bool =
+  for n in splitProcs:
+    if n == name: return true
+  return false
+
 proc resetEmitter() =
   externKeys = @[]
   externVals = @[]
@@ -1058,10 +1074,32 @@ proc procSignature(p: Node): string =
   let argStr = if args.len > 0: joinSeq(args, ", ") else: "void"
   return prefix & retC & " " & name & "(" & argStr & ")"
 
+proc genRpcStub(pp: ProcParts; cname: string): string =
+  ## The body emitted in place of a server-split proc: marshal POD params, call the runtime
+  ## RPC (aowl_rpc_call, provided by aowlrt), and unmarshal the POD result. Non-POD (strings,
+  ## seqs, refs) need aowlabi's deep marshal — TODO; POD covers the scalar case proven in the
+  ## VM model. The real body is never emitted, so the proc is genuinely absent from the binary.
+  result = "  unsigned char __req[8192]; size_t __n = 0;\n"
+  for pn in pp.pnodes:
+    let an = mangleToC(pn.kids[0].atom)
+    result.add "  memcpy(__req + __n, &" & an & ", sizeof(" & an & ")); __n += sizeof(" & an & ");\n"
+  result.add "  unsigned char* __resp = 0; size_t __rn = 0;\n"
+  result.add "  aowl_rpc_call(\"" & cname & "\", __req, __n, &__resp, &__rn);\n"
+  if pp.ret == nil or isDot(pp.ret):
+    result.add "  (void)__resp; (void)__rn;"
+  else:
+    let rc = genType(pp.ret)
+    result.add "  " & rc & " __r; memcpy(&__r, __resp, sizeof(__r));\n"
+    result.add "  return __r;"
+
 proc genProc(p: Node): string =
   let pp = procParts(p)
   let sig = procSignature(p)
   if pp.body == nil: return sig & ";"
+  let cname = declName(pp.nameAtom.atom, pp.pragmas)
+  if inServerSet(cname):
+    # Server-split: emit a stub, NOT the body. The IP never reaches the binary.
+    return sig & " {\n" & genRpcStub(pp, cname) & "\n}"
   let saved = curResultVar
   curResultVar = if pp.ret == nil or isDot(pp.ret): "" else: resultVarOf(pp.body)
   let bodyC = genStmt(pp.body)
