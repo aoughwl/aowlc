@@ -22,6 +22,35 @@ const path = require("path");
 const cp = require("child_process");
 const aowlc = require(path.join(__dirname, "..", "aowlc.js"));
 
+// Expand `@responsefile` tokens (gcc's own convention) into the argument list
+// they name, one path per line, each optionally double-quoted (matching
+// aowli's `responseFile()` writer: forward slashes, `\"` for a literal quote).
+// Exists because a whole-program `link` over 100+ modules can build a command
+// line past cmd.exe's 8,191-char limit; a response file has no such limit.
+function expandArgv(argv) {
+  const out = [];
+  for (const a of argv) {
+    if (a.length > 1 && a[0] === "@") {
+      const rspPath = a.slice(1);
+      let text;
+      try { text = fs.readFileSync(rspPath, "utf8"); }
+      catch (e) { fail("cannot read response file: " + rspPath); }
+      for (const rawLine of text.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        if (line.length >= 2 && line[0] === '"' && line[line.length - 1] === '"') {
+          out.push(line.slice(1, -1).replace(/\\"/g, '"'));
+        } else {
+          out.push(line);
+        }
+      }
+    } else {
+      out.push(a);
+    }
+  }
+  return out;
+}
+
 function parseArgs(argv) {
   const o = { args: [], _: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -119,7 +148,7 @@ function programC(file, opts) {
 }
 
 function main() {
-  const argv = process.argv.slice(2);
+  const argv = expandArgv(process.argv.slice(2));
   const cmd = argv[0];
   const o = parseArgs(argv.slice(1));
 

@@ -422,6 +422,17 @@ var noDeclTypes: seq[string] = @[]
 # a pointer). Every other bare symbol is an lvalue read, which is not a constant
 # expression and so cannot stand in a file-scope initializer. See isLiteralNode.
 var addrConstSyms: seq[string] = @[]
+# For the one place a Nim array's address is NOT the address of its wrapper:
+# an argument to an `importc` proc (see `importcArg`). `importcProcSyms` are the
+# procs, `arrayValueSyms` the params/locals/globals whose type is a wrapped
+# array, `typeDeclKeys/Vals` every type this unit can name, to resolve aliases.
+var importcProcSyms: seq[string] = @[]
+var arrayValueSyms: seq[string] = @[]
+var typeDeclKeys: seq[string] = @[]
+var typeDeclVals: seq[Node] = @[]
+# Raw (unmangled) field names belonging to an importc/header type - see the
+# `rawFields` note in `buildExternMaps`.
+var rawFields: seq[string] = @[]
 
 # cross-module resolution state: sibling `.c.nif` modules loaded on demand so we
 # can emit correct `extern` prototypes / type declarations for foreign symbols.
@@ -435,6 +446,15 @@ var modGlobalKeys: seq[string] = @[]
 var modGlobalVals: seq[Node] = @[]
 var modTypeKeys: seq[string] = @[]
 var modTypeVals: seq[Node] = @[]
+# A sibling module's top-level `{.emit.}` text, rendered once per sibling (see
+# `loadSiblingModule`). Needed when THIS module calls an `importc, nodecl`
+# proc backed by a `static`/`static inline` helper defined that way: such a
+# proc has no normal `extern` (there is nothing "extern" about a `static`
+# function), so the only way to make the call link is to carry the SAME
+# definition into this translation unit too - legal for `static inline`, and
+# harmless for plain `static` since each TU gets its own copy.
+var modEmitKeys: seq[string] = @[]
+var modEmitVals: seq[string] = @[]
 var checkedSuffixes: seq[string] = @[]   # suffixes already PROBED on disk
 
 proc resetEmitter() =
@@ -444,6 +464,11 @@ proc resetEmitter() =
   typeExternVals = @[]
   noDeclTypes = @[]
   addrConstSyms = @[]
+  importcProcSyms = @[]
+  arrayValueSyms = @[]
+  typeDeclKeys = @[]
+  typeDeclVals = @[]
+  rawFields = @[]
   ownMod = prog.main.name
   loadedMods = @[]
   siblingSuffixes = @[]
@@ -454,6 +479,8 @@ proc resetEmitter() =
   modGlobalVals = @[]
   modTypeKeys = @[]
   modTypeVals = @[]
+  modEmitKeys = @[]
+  modEmitVals = @[]
   # THE ONE THAT WAS MISSING. `checkedSuffixes` is a "we already probed this
   # suffix on disk" cache and `siblingSuffixes` is the positive result. Clearing
   # only the positive one turns the probe cache into a PERMANENT NEGATIVE: on the
@@ -486,6 +513,20 @@ proc symName(name: string): string =
   if mapHas(externKeys, name): return mapGet(externKeys, externVals, name)
   return mangleToC(name)
 
+proc fieldName(name: string): string =
+  ## Like `mangleToC`, but leaves a field of an importc/header type (see
+  ## `rawFields`) exactly as written: it must match the real C struct.
+  ##
+  ## A field atom carries the same trailing `.<scope-index>` every symbol
+  ## does (`tv_sec.0`), which `mangleToC` turns into part of the mangled name
+  ## (`.` -> `_`, giving `tvQ_sec_0`). A raw/importc'd field must come out
+  ## exactly as the real C struct spells it, so strip that suffix (via
+  ## `beforeDot`, already used the same way for procs) instead of mangling
+  ## it. Leaving it on produced `ts_1.tv_sec_0`, and `struct timespec` (from
+  ## `<time.h>`) has no member by that name - only `tv_sec`.
+  if mapHas(rawFields, name): return beforeDot(name)
+  return mangleToC(name)
+
 proc typeName(name: string): string =
   if mapHas(typeExternKeys, name): return mapGet(typeExternKeys, typeExternVals, name)
   return mangleToC(name)
@@ -510,11 +551,44 @@ proc hasPragma(pragmas: Node; names: openArray[string]): bool =
     if isList(p) and oneOf(p.tag, names): return true
   return false
 
+proc isWrappedArrayType(t: Node; depth = 0): bool =
+  ## Whether a value of type `t` is emitted as aowlc's array WRAPPER
+  ## (`struct { T a[N]; }`). A named type is followed to its declaration; an
+  ## `importc`/`nodecl` array is the foreign type itself, never wrapped.
+  if t == nil or depth > 16: return false
+  if isList(t):
+    return t.tag == "array"
+  if not isAtom(t) or isDot(t): return false
+  for i in 0 ..< typeDeclKeys.len:
+    if typeDeclKeys[i] == t.atom:
+      let td = typeDeclVals[i]
+      if hasPragma(findTag(td, "pragmas"), ["nodecl", "importc", "importcpp", "header"]):
+        return false
+      return isWrappedArrayType(td.kids[td.kids.len - 1], depth + 1)
+  false
+
+proc noteValueType(nameAtom: Node; t: Node) =
+  if isAtom(nameAtom) and isWrappedArrayType(t) and not mapHas(arrayValueSyms, nameAtom.atom):
+    arrayValueSyms.add nameAtom.atom
+
 # ---------------------------------------------------------------------------
 # forward declarations for the mutually-recursive emitters
 # ---------------------------------------------------------------------------
 proc genExpr(e: Node): string
 proc genType(t: Node): string
+
+proc importcArg(a: Node): string =
+  ## An argument to an `importc` proc. `addr buf`, where `buf` is a Nim array,
+  ## is the address of aowlc's wrapper struct - but the C callee (`fgets`,
+  ## `memcpy`...) wants a pointer to the ELEMENTS. nimony's own C backend
+  ## emits `&buf.a[0]` in exactly this position and nowhere else
+  ## (`lengc/genexprs.nim` `genAddr`, under `gfInCallImportC`); anywhere else
+  ## a `ptr array` must stay one. GCC 14 made the mismatch an error, which is
+  ## what stopped `aoughwl.ldraw`'s `readLine` compiling native.
+  if isList(a) and a.tag == "addr" and a.kids.len > 0 and isAtom(a.kids[0]) and
+      mapHas(arrayValueSyms, a.kids[0].atom):
+    return "(&" & genExpr(a.kids[0]) & ".a[0])"
+  genExpr(a)
 proc genStmt(s: Node): string
 proc genConstr(e: Node): string
 proc genInit(e: Node): string
@@ -646,7 +720,7 @@ proc constrBody(e: Node): string =
     let kv = e.kids[i]
     if isList(kv) and kv.tag == "kv":
       let fld = kv.kids[0]
-      let fname = if isAtom(fld): mangleToC(fld.atom) else: genExpr(fld)
+      let fname = if isAtom(fld): fieldName(fld.atom) else: genExpr(fld)
       var inh = ""
       if kv.kids.len > 2 and isAtom(kv.kids[2]) and isIntLit(kv.kids[2].atom):
         inh = myRepeat(".Q", parseI64(kv.kids[2].atom).int)
@@ -758,10 +832,12 @@ proc genExpr(e: Node): string =
     var start = 1
     if t == "onerr": start = 2
     let fn = genExpr(e.kids[start - 1])
+    let callee = e.kids[start - 1]
+    let foreign = isAtom(callee) and mapHas(importcProcSyms, callee.atom)
     var args: seq[string] = @[]
     var i = start
     while i < e.kids.len:
-      args.add genExpr(e.kids[i])
+      args.add(if foreign: importcArg(e.kids[i]) else: genExpr(e.kids[i]))
       inc i
     return fn & "(" & joinSeq(args, ", ") & ")"
   elif t == "suf":
@@ -787,7 +863,7 @@ proc genExpr(e: Node): string =
     var inh = ""
     if e.kids.len > 2 and isAtom(e.kids[2]) and isIntLit(e.kids[2].atom):
       inh = myRepeat(".Q", parseI64(e.kids[2].atom).int)
-    let fname = if isAtom(fld): mangleToC(fld.atom) else: genExpr(fld)
+    let fname = if isAtom(fld): fieldName(fld.atom) else: genExpr(fld)
     return obj & inh & "." & fname
   elif t == "sizeof":
     return "sizeof(" & genType(e.kids[0]) & ")"
@@ -854,6 +930,7 @@ proc genLocalVar(s: Node): string =
   let isConst = s.tag == "const"
   let nm = if isAtom(nameAtom): declName(nameAtom.atom, pragmas) else: "v"
   if isDot(typ): typ = nil
+  noteValueType(nameAtom, typ)
   let hasInit = value != nil and not isDot(value)
   var decl = if typ != nil: declare(typ, nm) else: "NI " & nm
   if isConst: decl = "static const " & decl
@@ -1049,6 +1126,7 @@ proc procSignature(p: Node): string =
   for pn in pp.pnodes:
     let nameNode = pn.kids[0]
     let pt = paramType(pn)
+    noteValueType(nameNode, pt)
     if isList(pt) and pt.tag == "varargs":
       args.add "..."
     else:
@@ -1279,7 +1357,17 @@ proc addHeaders(pragmas: Node; headers: var seq[string]) =
 
 proc isStmtTag(t: string): bool =
   oneOf(t, ["asgn", "store", "call", "hcall", "if", "while", "loop", "case",
-    "scope", "lab", "jmp", "discard", "onerr", "keepovf", "raise", "ret", "break"])
+    "scope", "lab", "jmp", "discard", "onerr", "keepovf", "raise", "ret", "break",
+    "emit"])
+    # `emit` must classify as a top-level statement too, not just inside a proc
+    # body: a module-level `{.emit: "…".}` (e.g. jitmem.nim's raw C helpers,
+    # called only via `importc, nodecl` procs defined alongside it) carries no
+    # `proc`/`gvar`/`type` tag, so without this it fell through every branch in
+    # `classify` and was silently dropped from the module's generated C -
+    # `gcc`'s report was "implicit declaration of function 'jit_call3'" etc.,
+    # pointing at the CALLER, not at the missing definition. See the `emit`
+    # case already handled correctly in `genStmt` below (dropped there too,
+    # once, per that case's own comment) - `classify` just never forwarded it.
 
 type
   Classified = object
@@ -1314,6 +1402,8 @@ proc buildExternMaps(procs, globals, types: seq[Node]) =
     elif hasPragma(pp.pragmas, ["importc", "exportc", "importcpp"]):
       externKeys.add pp.nameAtom.atom
       externVals.add beforeDot(pp.nameAtom.atom)
+    if hasPragma(pp.pragmas, ["importc", "importcpp"]):
+      importcProcSyms.add pp.nameAtom.atom
     addrConstSyms.add pp.nameAtom.atom          # function designator
   for g in globals:
     let nameAtom = g.kids[0]
@@ -1329,6 +1419,12 @@ proc buildExternMaps(procs, globals, types: seq[Node]) =
       let d = declare(g.kids[2], nameAtom.atom)
       if d.len > 0 and d[d.len - 1] == ']': addrConstSyms.add nameAtom.atom
   for td in types:
+    if isAtom(td.kids[0]):
+      typeDeclKeys.add td.kids[0].atom
+      typeDeclVals.add td
+  for g in globals:
+    if g.kids.len > 2: noteValueType(g.kids[0], g.kids[2])
+  for td in types:
     let nameAtom = td.kids[0]
     let pragmas = findTag(td, "pragmas")
     let ext = externName(pragmas)
@@ -1337,6 +1433,25 @@ proc buildExternMaps(procs, globals, types: seq[Node]) =
       typeExternVals.add ext
     if hasPragma(pragmas, ["nodecl", "importc", "importcpp", "header"]):
       noDeclTypes.add nameAtom.atom
+      # A header/importc'd type's fields are the REAL C struct's fields (e.g.
+      # DateTimespec's `tv_sec`/`tv_nsec` over `<time.h>`'s `struct timespec`):
+      # `genTypeDecl` rightly emits no declaration for this type at all and lets
+      # the real header provide it, but field ACCESS (`dot`) and CONSTRUCTION
+      # (`oconstr`'s `kv`) ran every field name through `mangleToC` regardless,
+      # turning `tv_sec` into `tvQ_sec_0` — a member that does not exist on the
+      # real `struct timespec`. gcc reported it at the use site ("no member
+      # named 'tvQ_sec_0'; did you mean 'tv_sec'"), not at this type. Record
+      # these fields' raw spellings so `dot`/`kv` can recognize and skip them.
+      let body = td.kids[td.kids.len - 1]
+      if isList(body) and (body.tag == "object" or body.tag == "union"):
+        var i = 0
+        if body.kids.len > 0 and (isDot(body.kids[0]) or isAtom(body.kids[0])):
+          i = 1
+        while i < body.kids.len:
+          let f = body.kids[i]
+          inc i
+          if isList(f) and f.tag == "fld" and f.kids.len > 0 and isAtom(f.kids[0]):
+            if not mapHas(rawFields, f.kids[0].atom): rawFields.add f.kids[0].atom
 
 proc collectCalls(node: Node; outp: var seq[string]) =
   if node == nil: return
@@ -1348,6 +1463,32 @@ proc collectCalls(node: Node; outp: var seq[string]) =
     for k in node.kids: collectCalls(k, outp)
 
 # value-type dependency ordering for struct decls
+proc collectValueTypeAtoms(node: Node; outp: var seq[string])
+
+# A return/param type of a `proctype` that is itself an atom: hard-depend on
+# it UNLESS it resolves to an object/union, in which case the existing
+# `typedef struct T T;` forward declaration already satisfies a by-value use
+# inside a never-called function TYPE (see the long comment at the
+# `proctype` case of `collectValueTypeAtoms`, below) - mark it the same
+# "@ptr:"-prefixed, forward-decl-suffices way that case's own `ptr`/`aptr`
+# branch already marks a true pointer dependency.
+proc addProctypeTypeDep(t: Node; outp: var seq[string]) =
+  if t == nil: return
+  if isAtom(t) and not isDot(t):
+    var isObj = false
+    for i in 0 ..< typeDeclKeys.len:
+      if typeDeclKeys[i] == t.atom:
+        let b = typeDeclVals[i].kids[typeDeclVals[i].kids.len - 1]
+        if isList(b) and (b.tag == "object" or b.tag == "union"): isObj = true
+        break
+    if isObj:
+      let marked = "@ptr:" & t.atom
+      if not mapHas(outp, marked): outp.add marked
+    else:
+      if not mapHas(outp, t.atom): outp.add t.atom
+    return
+  collectValueTypeAtoms(t, outp)
+
 proc collectValueTypeAtoms(node: Node; outp: var seq[string]) =
   if node == nil: return
   if isAtom(node):
@@ -1356,9 +1497,73 @@ proc collectValueTypeAtoms(node: Node; outp: var seq[string]) =
     return
   if not isList(node): return
   let tg = node.tag
-  if tg == "ptr" or tg == "aptr" or tg == "flexarray": return
+  if tg == "ptr" or tg == "aptr" or tg == "flexarray":
+    # A pointer to an object only needs its forward declaration, but a pointer
+    # to a scalar alias (notably an enum lowered as `typedef NU8`) needs that
+    # alias declared before the containing type.  Record the dependency; the
+    # existing object forward-declaration pass keeps pointer cycles valid.
+    # Preserve that this is a pointer dependency. `otValueDeps` can then keep
+    # scalar aliases before their users while letting the existing forward
+    # declarations break object-pointer cycles (CoroutineBase <->
+    # Continuation is a real example).
+    if node.kids.len > 0 and isAtom(node.kids[0]) and not isDot(node.kids[0]):
+      let marked = "@ptr:" & node.kids[0].atom
+      if not mapHas(outp, marked): outp.add marked
+    return
   elif tg == "array":
     collectValueTypeAtoms(node.kids[0], outp)
+    return
+  elif tg == "proctype":
+    # A function-pointer typedef (an interface method slot, e.g. IAref's
+    # vtable) is a *scalar* C typedef whose underlying spelling is "typedef
+    # RET (*Name)(ARGS);" (see `declare`'s `proctype` case) - RET and every
+    # ARG type must already be visible as C identifiers at that line, exactly
+    # like any other typedef's dependencies. This case was MISSING, so
+    # `otValueDeps` saw no dependencies at all for a proctype body and placed
+    # it wherever the unordered pass happened to land it. When RET is a plain
+    # alias (`typedef NU8 ErrorCode_0_...;`, not yet forward-declared the way
+    # an object is), that could and did land the proctype typedef BEFORE its
+    # own return type's typedef: gcc saw the undeclared identifier where the
+    # alias should have been and reported "expected declaration specifiers
+    # or '...' before '*' token" on the typedef line itself, which meant the
+    # typedef as a whole was never defined - every later reference to that
+    # EXACT same identifier (the struct field, the call site) then failed
+    # with "unknown type name", even though the name was spelled consistently
+    # throughout; it only ever looked like two different mangled names
+    # because gcc's "did you mean" picked the nearest sibling slot that DID
+    # parse. Recurse into the return type and each parameter type exactly as
+    # `declare` renders them, so the real dependency reaches `otValueDeps`.
+    #
+    # A return/param type that is itself passed BY VALUE and resolves to an
+    # `object`/`union` is a DIFFERENT case from the scalar-alias one above:
+    # `Continuation`/`CoroutineBase` return and take each other by value
+    # through a `proctype` field, and C allows a function TYPE (never called,
+    # only named - exactly what a typedef is) to name an incomplete struct as
+    # its return/param type; only a CALL or a DEFINITION needs it complete.
+    # The existing `typedef struct T T;` forward-declaration pass already
+    # gives every object/union that incomplete type ahead of all typedefs, so
+    # treating these the same as a hard, order-before dependency (as the
+    # naive first version of this fix did) manufactured a cycle where there
+    # was never a real ordering requirement - A's proctype field needs the
+    # proctype typedef first, the proctype's return type is A by value, and
+    # A is also a struct the proctype points AT by pointer elsewhere, so the
+    # old no-op (zero dependencies) had accidentally been fine. Route a
+    # by-value object/union return/param through the SAME "@ptr:"-marked,
+    # forward-decl-satisfies-it path `collectValueTypeAtoms`'s own `ptr`/
+    # `aptr` case already uses, via `addProctypeTypeDep` below; only a non-
+    # object (a scalar alias like `ErrorCode_0_... = NU8`, with no forward
+    # declaration of its own) becomes a real hard dependency.
+    let params = findTag(node, "params")
+    var ret: Node = nil
+    if params != nil:
+      let idx = indexOfKid(node, params)
+      if idx >= 0 and idx + 1 < node.kids.len: ret = node.kids[idx + 1]
+    else:
+      if node.kids.len > 0: ret = node.kids[node.kids.len - 1]
+    if ret != nil: addProctypeTypeDep(ret, outp)
+    if params != nil:
+      for k in params.kids:
+        if isList(k) and k.tag == "param": addProctypeTypeDep(paramType(k), outp)
     return
   elif tg == "object" or tg == "union":
     var start = 0
@@ -1409,7 +1614,23 @@ proc otValueDeps(td: Node): seq[string] =
   var deps: seq[string] = @[]
   collectValueTypeAtoms(td.kids[td.kids.len - 1], deps)
   for d in deps:
-    if mapHas(otNames, d) and not mapHas(result, d): result.add d
+    var name = d
+    var throughPtr = false
+    if d.len > 5 and d[0 .. 4] == "@ptr:":
+      name = d[5 .. d.len - 1]
+      throughPtr = true
+    if not mapHas(otNames, name): continue
+    if throughPtr:
+      let dep = otByName(name)
+      # `typedef struct T T;` already appears before every object/union body,
+      # so an object pointer needs no complete definition. Scalar aliases and
+      # array wrappers have no such forward declaration and must still precede
+      # the pointer user.
+      if dep != nil:
+        let body = dep.kids[dep.kids.len - 1]
+        if isList(body) and (body.tag == "object" or body.tag == "union"):
+          continue
+    if not mapHas(result, name): result.add name
 
 proc otVisit(td: Node) =
   let nm = td.kids[0].atom
@@ -1458,16 +1679,49 @@ proc foreignModuleOf(atom: string): string =
     return lc
   return ""
 
+# A parse cache for sibling modules, OFF unless a caller turns it on. Emitting a
+# whole program in one process (the aowli host) prints N modules, and every one
+# of them re-read and re-parsed the same siblings (system, syncio, ...) from
+# disk: for a 79-module mod that was most of the emit time. Nodes are never
+# mutated after `buildNode`, so sharing a parsed tree is safe; the cache is
+# scoped to one emit pass (begin/end) because a file on disk can change between
+# passes and nothing here would notice.
+var treeCacheOn = false
+var treeCachePaths: seq[string] = @[]
+var treeCacheTrees: seq[Node] = @[]
+
+proc emitTreeCacheBegin*() =
+  treeCacheOn = true
+  treeCachePaths = @[]
+  treeCacheTrees = @[]
+
+proc emitTreeCacheEnd*() =
+  treeCacheOn = false
+  treeCachePaths = @[]
+  treeCacheTrees = @[]
+
 proc loadSiblingModule(suffix: string) =
   if mapHas(loadedMods, suffix): return
   loadedMods.add suffix
   let dir = if prog.main.dir.len > 0: prog.main.dir else: "."
   let path = dir & "/" & suffix & ".c.nif"
   if not fileExists(path): return
-  var buf = parseFromFile(path)
-  var cur = beginRead(buf)
-  let tree = buildNode(cur)
-  endRead buf
+  var tree: Node = nil
+  var haveTree = false
+  if treeCacheOn:
+    for ti in 0 ..< treeCachePaths.len:
+      if treeCachePaths[ti] == path:
+        tree = treeCacheTrees[ti]
+        haveTree = true
+        break
+  if not haveTree:
+    var buf = parseFromFile(path)
+    var cur = beginRead(buf)
+    tree = buildNode(cur)
+    endRead buf
+    if treeCacheOn:
+      treeCachePaths.add path
+      treeCacheTrees.add tree
   if not isList(tree): return
   for d in tree.kids:
     if not isList(d): continue
@@ -1483,20 +1737,160 @@ proc loadSiblingModule(suffix: string) =
       if d.kids.len > 0 and isAtom(d.kids[0]):
         modTypeKeys.add d.kids[0].atom
         modTypeVals.add d
+    elif d.tag == "emit":
+      let c = genStmt(d)
+      if c.len > 0:
+        if not mapHas(modEmitKeys, suffix):
+          modEmitKeys.add suffix
+          modEmitVals.add c
+        else:
+          for i in 0 ..< modEmitKeys.len:
+            if modEmitKeys[i] == suffix:
+              modEmitVals[i].add "\n" & c
+              break
+
+proc rawEmitOfModule(suffix: string): string =
+  for i in 0 ..< modEmitKeys.len:
+    if modEmitKeys[i] == suffix: return modEmitVals[i]
+  return ""
+
+proc contentHash(s: string): string =
+  ## A cheap, stable hash for naming an include guard - see `guardEmit`.
+  var h: uint64 = 1469598103934665603'u64        # FNV-1a offset basis
+  for ch in s:
+    h = h xor uint64(ord(ch))
+    h = h * 1099511628211'u64                     # FNV-1a prime
+  var v = h
+  result = ""
+  if v == 0: result = "0"
+  while v > 0'u64:
+    let d = int(v mod 16'u64)
+    result.add (if d < 10: chr(ord('0') + d) else: chr(ord('a') + d - 10))
+    v = v div 16'u64
+
+proc splitTopChunks(text: string): seq[string] =
+  ## Split a raw `{.emit.}` block into its top-level declarations - each
+  ## accumulated line by line until brace depth returns to 0, so a one-
+  ## line declaration (`static inline … { … }`) closes immediately and a
+  ## multi-line one (an `#ifdef`-guarded function spanning several lines)
+  ## stays open until its matching `}`. Good enough for the shape every
+  ## known block of this kind has; see `guardEmit` for why per-DECLARATION
+  ## granularity, not per-BLOCK, is what the dedup actually needs.
+  result = @[]
+  var cur = ""
+  var depth = 0
+  var cppDepth = 0   # #if/#ifdef/#ifndef .. #endif nesting - see below
+  for raw in splitLinesNl(text):
+    if cur.len == 0 and stripBoth(raw).len == 0: continue
+    cur.add raw
+    cur.add "\n"
+    let line = stripBoth(raw)
+    # A preprocessor conditional has no braces, so brace-depth alone split
+    # jitmem.nim's `#ifdef _WIN32 / #include <windows.h> / #else /
+    # #include <sys/mman.h> / #endif` into five one-line "chunks", each
+    # wrapped in its own `#ifndef AOWLC_EMIT_.. / #endif` - which tore the
+    # `#else` out from between its `#ifdef` and the `#endif` it belonged
+    # to, so the `#else` branch (the POSIX header) compiled UNCONDITIONALLY
+    # on the Windows build it was never meant to reach: "fatal error:
+    # sys/mman.h: No such file or directory". Track `#if`/`#ifdef`/
+    # `#ifndef` vs `#endif` the same way `{`/`}` are tracked, and do not
+    # close a chunk while either nesting is still open.
+    if line.len >= 3 and (line[0 .. 2] == "#if"):
+      inc cppDepth
+    elif line.len >= 6 and line[0 .. 5] == "#endif":
+      if cppDepth > 0: dec cppDepth
+    for ch in raw:
+      if ch == '{': inc depth
+      elif ch == '}':
+        if depth > 0: dec depth
+    if depth <= 0 and cppDepth <= 0:
+      result.add cur
+      cur = ""
+  if stripBoth(cur).len > 0: result.add cur
+
+proc guardEmit(text: string): string =
+  ## Wrap each top-level declaration of a raw `{.emit.}` block (own
+  ## module's, or a foreign module's pulled-in copy - see the `nodecl`
+  ## case near `foreignDefs`) in a `#ifndef`/`#define` keyed on that ONE
+  ## declaration's content, not the whole block's. Several "prelude"
+  ## modules (prelude_b1/b2/jit/intl/main) each carry their own byte-
+  ## identical copy of some helpers (`js_f2u`/`js_u2f` et al) ALONGSIDE
+  ## other, prelude-specific ones, so the two modules' BLOCKS differ even
+  ## though the shared declarations inside them are identical - a module
+  ## that foreign-needs the helper from two of them (or needs its own copy
+  ## AND a foreign one) got BOTH full blocks pasted in, and gcc rejected it
+  ## as "redefinition of 'js_f2u'" even with a block-level guard (the two
+  ## blocks hashed differently). Guarding per declaration makes the
+  ## IDENTICAL ones collapse for free through the C preprocessor, while the
+  ## declarations that are NOT shared still make it in from whichever
+  ## block carried them - no bookkeeping that can itself go stale.
+  if text.len == 0: return text
+  var outp = ""
+  for chunk in splitTopChunks(text):
+    let guard = "AOWLC_EMIT_" & contentHash(stripBoth(chunk))
+    outp.add "#ifndef " & guard & "\n#define " & guard & "\n" & chunk & "#endif\n"
+  outp
+
+proc finalDot(s: string): int =
+  result = s.len - 1
+  while result >= 0 and s[result] != '.': dec result
+
+proc sameSymbolStem(a, b: string): bool =
+  ## The final NIF component is the owning module.  A sibling read while the
+  ## embedded host's synthetic main module is active may carry that synthetic
+  ## component instead of its own filename.  The preceding components still
+  ## identify the exact overload, and the caller has already selected `b` from
+  ## the sibling file named by `a`'s real owner.
+  let acut = finalDot(a)
+  let bcut = finalDot(b)
+  if acut < 0 or bcut < 0: return false
+  if acut != bcut: return false
+  var i = 0
+  while i < acut:
+    if a[i] != b[i]: return false
+    inc i
+  true
 
 proc modFindProc(atom: string): Node =
   for i in 0 ..< modProcKeys.len:
     if modProcKeys[i] == atom: return modProcVals[i]
+  # A sibling `.c.nif` records definitions with an empty final module slot
+  # (`fill.0.`), while callers name that same symbol with the sibling's real
+  # suffix (`fill.0.jesaqohvh1`).  NIF's symbol pool expands the latter while
+  # reading the calling unit, but it has no reason to rewrite the sibling
+  # definition.  Match that one well-defined spelling difference here; matching
+  # on only the proc base would conflate overloads.
+  let cut = finalDot(atom)
+  if cut >= 0:
+    let unsuffixed = atom[0 .. cut]
+    for i in 0 ..< modProcKeys.len:
+      if modProcKeys[i] == unsuffixed: return modProcVals[i]
+    for i in 0 ..< modProcKeys.len:
+      if sameSymbolStem(atom, modProcKeys[i]): return modProcVals[i]
   return nil
 
 proc modFindGlobal(atom: string): Node =
   for i in 0 ..< modGlobalKeys.len:
     if modGlobalKeys[i] == atom: return modGlobalVals[i]
+  let cut = finalDot(atom)
+  if cut >= 0:
+    let unsuffixed = atom[0 .. cut]
+    for i in 0 ..< modGlobalKeys.len:
+      if modGlobalKeys[i] == unsuffixed: return modGlobalVals[i]
+    for i in 0 ..< modGlobalKeys.len:
+      if sameSymbolStem(atom, modGlobalKeys[i]): return modGlobalVals[i]
   return nil
 
 proc modFindType(atom: string): Node =
   for i in 0 ..< modTypeKeys.len:
     if modTypeKeys[i] == atom: return modTypeVals[i]
+  let cut = finalDot(atom)
+  if cut >= 0:
+    let unsuffixed = atom[0 .. cut]
+    for i in 0 ..< modTypeKeys.len:
+      if modTypeKeys[i] == unsuffixed: return modTypeVals[i]
+    for i in 0 ..< modTypeKeys.len:
+      if sameSymbolStem(atom, modTypeKeys[i]): return modTypeVals[i]
   return nil
 
 # Recursively collect every atom in `n` that names a foreign-module symbol.
@@ -1673,9 +2067,57 @@ proc emitUnit(parts: Classified): string =
   # linkage — the defining module emits the definition, we just declare it).
   var stubs: seq[string] = @[]          # foreign prototypes + extern globals
   var foreignDefs: seq[string] = @[]    # foreign `static inline` definitions
+  var rawEmitsPulled: seq[string] = @[]   # sibling suffixes already pulled in
+  var pulledRawNames: seq[string] = @[]   # raw C names already defined in this TU's pulled blocks
+  # Declared here, not down by `topStmts` below, so the pull-in case just below
+  # can land a sibling's raw `{.emit.}` text in the SAME early section as this
+  # module's own (see the full comment at the `topStmts` loop). A pulled-in
+  # `sm_len`-style helper was instead going into `foreignDefs`, the section for
+  # cross-module `static inline` Nim PROCS - and so was the Nim-level inline
+  # proc that CALLS it (e.g. `bufLen`), in the two's `foreignProcs` iteration
+  # order. When the caller's entry came first, its body (containing the call)
+  # landed in `foreignDefs` before the pulled helper's definition did, both
+  # still inside that one section: "implicit declaration of function
+  # 'sm_len'", then "conflicting types for 'sm_len'" once the real definition
+  # was reached further down the SAME file. Routing the pulled text into
+  # `rawEmits` instead puts it in the section already guaranteed to precede
+  # every proc, cross-module or not.
+  var rawEmits: seq[string] = @[]
   for pn in foreignProcs:
     let pp = procParts(pn)
-    if hasPragma(pp.pragmas, ["header", "nodecl"]): continue
+    if hasPragma(pp.pragmas, ["header", "nodecl"]):
+      # `nodecl` means "no declaration needed", which is true for a real
+      # extern-elsewhere symbol (a libc function, or one with its own
+      # `header`) but WRONG for an `importc, nodecl` proc backed by a
+      # `static`/`static inline` helper the origin module defined itself via
+      # `{.emit.}` (jsF2U -> `js_f2u`, sm_len's `sm_*` family, …): that
+      # helper has internal linkage, invisible outside the ONE translation
+      # unit its own module's rawEmits landed in. `continue`ing here with
+      # nothing else emitted left every OTHER module calling it with no
+      # declaration at all - "implicit declaration of function 'js_f2u'" at
+      # the call site, while the (correct, ordered) definition sat one
+      # module over. Pull that module's whole rawEmits text in too, exactly
+      # like the `static inline` Nim-level case below; it is a no-op (empty
+      # string) for a proc that is genuinely declared elsewhere.
+      #
+      # Several "prelude" modules (prelude_b1/b2/jit/intl/main) each carry
+      # their OWN copy of the SAME helper (`js_f2u` et al), byte-identical
+      # `{.emit.}` text, duplicated on purpose so each prelude module stays
+      # self-contained - two different Nim symbols, in two different
+      # sibling modules, both `importc: "js_f2u"`. A module that foreign-
+      # calls BOTH (one proc resolving to value.nim's copy, another to a
+      # prelude's) pulled in both modules' rawEmits, and gcc saw TWO
+      # `static inline js_f2u` definitions in the one file - "redefinition
+      # of 'js_f2u'". `guardEmit` (content-hash `#ifndef`) makes the
+      # SECOND, byte-identical pull a no-op through the C preprocessor
+      # itself - simpler and more robust than tracking which module or
+      # name supplied it.
+      let m = lastComponent(pp.nameAtom.atom)
+      if m.len > 0 and not mapHas(rawEmitsPulled, m):
+        rawEmitsPulled.add m
+        let txt = rawEmitOfModule(m)
+        if txt.len > 0: rawEmits.add guardEmit(txt)
+      continue
     if hasPragma(pp.pragmas, ["importc", "importcpp"]):
       var ext = externName(pp.pragmas)
       if ext.len == 0: ext = beforeDot(pp.nameAtom.atom)
@@ -1690,7 +2132,13 @@ proc emitUnit(parts: Classified): string =
     # other inline bodies resolve regardless of order) plus the full body.
     if hasPragma(pp.pragmas, ["inline"]) and pp.body != nil:
       stubs.add procSignature(pn) & ";"
-      foreignDefs.add genProc(pn)
+      # Two DIFFERENT foreign procs can render to the identical `static
+      # inline` C text (an overloaded or generic-instantiated proc reached
+      # through two different call sites/symbol atoms, both resolving to
+      # the same instantiation) - same redefinition hazard as the rawEmits
+      # case just above, same fix: dedup by the rendered text.
+      let body = genProc(pn)
+      if not mapHas(foreignDefs, body): foreignDefs.add body
       continue
     stubs.add "extern " & procSignature(pn) & ";"
   for gn in foreignGlobals:
@@ -1719,9 +2167,27 @@ proc emitUnit(parts: Classified): string =
     data.add info.decl
     if info.needsInit:
       inits.add symName(info.nameAtom) & " = " & genExpr(info.value) & ";"
+  # A top-level `{.emit: "…".}` is raw verbatim C, almost always a `static`
+  # helper definition that other procs in THIS module call directly (see
+  # jitmem.nim's `jit_call3` etc.) To build, that text must precede every
+  # proc that calls it. Funneling it through `inits` (the `__attribute__
+  # ((constructor))` body, built below) put it dead last in the file - after
+  # every proc that referenced it - so gcc saw "implicit declaration of
+  # function 'jit_call3'" at the CALL SITE even though the code was right
+  # there, a few hundred lines further down. Emit it as its own early section
+  # instead; every other top-level statement still runs at module-init time.
+  # `guardEmit` (same content-hash `#ifndef` as the foreign-pull case above)
+  # covers this module too: if some OTHER unit sharing this build's
+  # accumulating output buffer already pulled this exact text in as a
+  # foreign dependency (or will later), the two copies collapse into one
+  # through the C preprocessor instead of redefining the same C name.
   for s in topStmts:
-    let c = genStmt(s)
-    if c.len > 0: inits.add c
+    if s.tag == "emit":
+      let c = genStmt(s)
+      if c.len > 0: rawEmits.add guardEmit(c)
+    else:
+      let c = genStmt(s)
+      if c.len > 0: inits.add c
 
   # C headers pulled in by importc procs/globals/types -> real #includes.
   var headers: seq[string] = @[]
@@ -1758,6 +2224,8 @@ proc emitUnit(parts: Classified): string =
     outp.add "/* --- cross-module declarations --- */\n" & joinSeq(stubs, "\n") & "\n\n"
   if provisions.len > 0:
     outp.add "/* --- runtime provisions (no-header importc) --- */\n" & joinSeq(provisions, "\n") & "\n\n"
+  if rawEmits.len > 0:
+    outp.add "/* --- verbatim {.emit.} --- */\n" & joinSeq(rawEmits, "\n") & "\n\n"
   # GLOBALS BEFORE THE CROSS-MODULE INLINE BODIES, not after. A `static inline`
   # proc from another module is COPIED into this TU whole (it has internal
   # linkage, so every user must carry its own definition), and its body can
