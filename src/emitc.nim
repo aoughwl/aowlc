@@ -806,6 +806,9 @@ proc genExpr(e: Node): string =
     let ty = genType(e.kids[0])
     let a = e.kids[e.kids.len - 2]
     let b = e.kids[e.kids.len - 1]
+    # `%` is not defined on floating point in C: a float `mod` is `fmod`
+    if t == "mod" and ty.len >= 2 and ty[0] == 'N' and ty[1] == 'F':
+      return "((" & ty & ")__builtin_fmod(" & genExpr(a) & ", " & genExpr(b) & "))"
     return "((" & ty & ")(" & genExpr(a) & tb & genExpr(b) & "))"
   let cb = cmpBinOp(t)
   if cb.len > 0:
