@@ -953,6 +953,8 @@ proc genLocalVar(s: Node): string =
   let hasInit = value != nil and not isDot(value)
   var decl = if typ != nil: declare(typ, nm) else: "NI " & nm
   if isConst: decl = "static const " & decl
+  # a routine-local `{.global.}` keeps its value across calls
+  if s.tag == "gvar" or s.tag == "glet": decl = "static " & decl
   # INITIALIZER position, so genInit, not genExpr — a local `const` is emitted
   # `static const`, and a static object's initializer must be a constant
   # expression, which a compound literal is not. See genInit.
@@ -1330,7 +1332,9 @@ proc genTypeDecl(td: Node): string =
   let pragmas = findTag(td, "pragmas")
   let body = td.kids[td.kids.len - 1]
   if hasPragma(pragmas, ["nodecl", "importc", "importcpp", "header"]): return ""
-  let nm = mangleToC(nameAtom.atom)
+  # an `exportc "Name"` type is DEFINED under that name too: every reference
+  # (`typeName`) already spells it that way
+  let nm = typeName(nameAtom.atom)
   if isList(body):
     if body.tag == "object" or body.tag == "union":
       return genObjectDecl(nm, body, body.tag == "union",
@@ -2069,7 +2073,7 @@ proc emitUnit(parts: Classified): string =
     if hasPragma(pragmas, ["nodecl", "importc", "importcpp", "header"]): continue
     let body = td.kids[td.kids.len - 1]
     if isList(body) and (body.tag == "object" or body.tag == "union"):
-      let nm = mangleToC(td.kids[0].atom)
+      let nm = typeName(td.kids[0].atom)
       let kw = if body.tag == "union": "union " else: "struct "
       fwdDecls.add "typedef " & kw & nm & " " & nm & ";"
 
