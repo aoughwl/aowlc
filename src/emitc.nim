@@ -427,6 +427,7 @@ var addrConstSyms: seq[string] = @[]
 # procs, `arrayValueSyms` the params/locals/globals whose type is a wrapped
 # array, `typeDeclKeys/Vals` every type this unit can name, to resolve aliases.
 var importcProcSyms: seq[string] = @[]
+var sizedTypeHeaders: seq[string] = @[]  # `(header ...)` of importc'd sized types (see `genSized`)
 var arrayValueSyms: seq[string] = @[]
 var typeDeclKeys: seq[string] = @[]
 var typeDeclVals: seq[Node] = @[]
@@ -481,6 +482,7 @@ proc resetEmitter() =
   noDeclTypes = @[]
   addrConstSyms = @[]
   importcProcSyms = @[]
+  sizedTypeHeaders = @[]
   arrayValueSyms = @[]
   typeDeclKeys = @[]
   typeDeclVals = @[]
@@ -650,6 +652,32 @@ proc bitsOf(t: Node): string =
       return k.atom
   return ""
 
+# A sized type can also NAME its C spelling: ctypes' `culong {.importc:
+# "unsigned long", nodecl.} = uint32` reaches the `.c.nif` as `(u 32 (importc
+# "unsigned long"))`, inline at every use, not as a named type declaration.
+# lengc prints the importc name there (gentypes.nim, atomNumber); printing the
+# width-only `NU32` instead is `unsigned int`, which is the same size but not
+# the same C type, so `unsigned long (*)(void*)` (LPTHREAD_START_ROUTINE) and
+# `unsigned long*` (LPDWORD) arguments built from it are incompatible pointer
+# types and GCC 14+ rejects the call (std/rawthreads' CreateThread). A
+# `(header ...)` beside it is recorded (`sizedTypeHeaders`) so the name it
+# imports is declared.
+
+proc sizedImportName(t: Node): string =
+  for k in t.kids:
+    if isList(k) and (k.tag == "importc" or k.tag == "importcpp") and
+       k.kids.len > 0 and k.kids[0] != nil and k.kids[0].kind == nkStr:
+      result = k.kids[0].strVal
+    elif isList(k) and k.tag == "header" and k.kids.len > 0 and
+         k.kids[0] != nil and k.kids[0].kind == nkStr:
+      if not mapHas(sizedTypeHeaders, k.kids[0].strVal):
+        sizedTypeHeaders.add k.kids[0].strVal
+
+proc genSized(t: Node; prefix: string): string =
+  let imported = sizedImportName(t)
+  if imported.len > 0: return imported
+  return prefix & bitsOf(t)
+
 proc genProcTypePtr(t: Node): string =
   let params = findTag(t, "params")
   var ret: Node = nil
@@ -674,10 +702,10 @@ proc genType(t: Node): string =
     fail("aowlc: bad type node")
     return ""
   let tg = t.tag
-  if tg == "i": return "NI" & bitsOf(t)
-  elif tg == "u": return "NU" & bitsOf(t)
-  elif tg == "f": return "NF" & bitsOf(t)
-  elif tg == "c": return "NC" & bitsOf(t)
+  if tg == "i": return genSized(t, "NI")
+  elif tg == "u": return genSized(t, "NU")
+  elif tg == "f": return genSized(t, "NF")
+  elif tg == "c": return genSized(t, "NC")
   elif tg == "bool": return "NB8"
   elif tg == "void": return "void"
   elif tg == "ptr" or tg == "aptr": return genType(t.kids[0]) & "*"
@@ -2242,6 +2270,8 @@ proc emitUnit(parts: Classified): string =
   for p in foreignProcs: addHeaders(procParts(p).pragmas, headers)
   for g in foreignGlobals: addHeaders(g.kids[1], headers)
   for td in foreignTypes: addHeaders(findTag(td, "pragmas"), headers)
+  for h in sizedTypeHeaders:
+    if not mapHas(headers, h): headers.add h
 
   # libc-backed implementations for no-header importc runtime symbols; their
   # header needs are folded into the #include set.
