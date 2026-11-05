@@ -664,6 +664,7 @@ proc bitsOf(t: Node): string =
 # imports is declared.
 
 proc sizedImportName(t: Node): string =
+  result = ""
   for k in t.kids:
     if isList(k) and (k.tag == "importc" or k.tag == "importcpp") and
        k.kids.len > 0 and k.kids[0] != nil and k.kids[0].kind == nkStr:
