@@ -199,6 +199,7 @@ class Emitter {
     this.externOfSym = new Map();   // symbol name -> extern C name (importc/exportc)
     this.typeExtern = new Map();    // type symbol name -> extern C name
     this.noDeclType = new Set();    // type symbols with importc/nodecl -> emit no decl
+    this.sizedHeaders = new Set();  // `(header …)` of importc'd sized types (genSized)
     this.typeBody = new Map();      // type symbol name -> body node
     // Symbols that, named bare in an expression, ARE an address constant and so
     // may appear in a file-scope initializer: a proc (function designator) and a
@@ -248,6 +249,21 @@ class Emitter {
     }
     return "";
   }
+  // A sized type can name its C spelling: ctypes' `culong {.importc: "unsigned
+  // long", nodecl.} = uint32` arrives inline as `(u 32 (importc "unsigned
+  // long"))`. Print that name, as lengc does; the width-only `NU32` is `unsigned
+  // int`, a different C type, and pointers built from it (CreateThread's
+  // LPTHREAD_START_ROUTINE / LPDWORD) are incompatible types to GCC 14+. A
+  // `(header …)` beside it is recorded so the imported name is declared.
+  genSized(t, prefix) {
+    let name = "";
+    for (const k of t.kids) {
+      if (!isList(k) || !k.kids[0] || typeof k.kids[0].str !== "string") continue;
+      if (k.tag === "importc" || k.tag === "importcpp") name = k.kids[0].str;
+      else if (k.tag === "header") this.sizedHeaders.add(k.kids[0].str);
+    }
+    return name || prefix + this.bitsOf(t);
+  }
   genType(t) {
     if (isDot(t)) return "void";
     if (isAtom(t)) {
@@ -256,10 +272,10 @@ class Emitter {
     }
     if (!isList(t)) throw new Error("aowlc: bad type node");
     switch (t.tag) {
-      case "i": return "NI" + this.bitsOf(t);
-      case "u": return "NU" + this.bitsOf(t);
-      case "f": return "NF" + this.bitsOf(t);
-      case "c": return "NC" + this.bitsOf(t);
+      case "i": return this.genSized(t, "NI");
+      case "u": return this.genSized(t, "NU");
+      case "f": return this.genSized(t, "NF");
+      case "c": return this.genSized(t, "NC");
       case "bool": return "NB8";
       case "void": return "void";
       case "ptr": case "aptr": return this.genType(t.kids[0]) + "*";
@@ -1404,6 +1420,7 @@ function emitUnit(parts, opts = {}) {
   for (const g of globals) addHeaders(g.kids[1]);
   for (const g of extGlobals) addHeaders(g.kids[1]);   // e.g. <stdio.h> for stdout
   for (const td of types) addHeaders(td.kids.find((k) => isList(k) && k.tag === "pragmas"));
+  for (const h of em.sizedHeaders) headers.add(h);
 
   // libc-backed implementations for no-header importc runtime symbols (the
   // mimalloc allocator) so a linked program is self-contained without -lmimalloc.
