@@ -443,10 +443,13 @@ var siblingSuffixes: seq[string] = @[]      # module basenames present in the di
 var siblingSuffixesLoaded = false
 var modProcKeys: seq[string] = @[]
 var modProcVals: seq[Node] = @[]
+var modProcOwn: seq[string] = @[]           # the sibling module each key was read from
 var modGlobalKeys: seq[string] = @[]
 var modGlobalVals: seq[Node] = @[]
+var modGlobalOwn: seq[string] = @[]
 var modTypeKeys: seq[string] = @[]
 var modTypeVals: seq[Node] = @[]
+var modTypeOwn: seq[string] = @[]
 # A sibling module's top-level `{.emit.}` text, rendered once per sibling (see
 # `loadSiblingModule`). Needed when THIS module calls an `importc, nodecl`
 # proc backed by a `static`/`static inline` helper defined that way: such a
@@ -493,10 +496,13 @@ proc resetEmitter() =
   siblingSuffixesLoaded = false
   modProcKeys = @[]
   modProcVals = @[]
+  modProcOwn = @[]
   modGlobalKeys = @[]
   modGlobalVals = @[]
+  modGlobalOwn = @[]
   modTypeKeys = @[]
   modTypeVals = @[]
+  modTypeOwn = @[]
   modEmitKeys = @[]
   modEmitVals = @[]
   # THE ONE THAT WAS MISSING. `checkedSuffixes` is a "we already probed this
@@ -1803,14 +1809,17 @@ proc loadSiblingModule(suffix: string) =
       if d.kids.len > 0 and isAtom(d.kids[0]):
         modProcKeys.add d.kids[0].atom
         modProcVals.add d
+        modProcOwn.add suffix
     elif oneOf(d.tag, ["gvar", "tvar", "glet", "var", "let", "const"]):
       if d.kids.len > 0 and isAtom(d.kids[0]):
         modGlobalKeys.add d.kids[0].atom
         modGlobalVals.add d
+        modGlobalOwn.add suffix
     elif d.tag == "type":
       if d.kids.len > 0 and isAtom(d.kids[0]):
         modTypeKeys.add d.kids[0].atom
         modTypeVals.add d
+        modTypeOwn.add suffix
     elif d.tag == "emit":
       let c = genStmt(d)
       if c.len > 0:
@@ -1934,37 +1943,40 @@ proc modFindProc(atom: string): Node =
   # reading the calling unit, but it has no reason to rewrite the sibling
   # definition.  Match that one well-defined spelling difference here; matching
   # on only the proc base would conflate overloads.
+  let own = lastComponent(atom)   # a loose match may only land on a key read from the atom's own module
   let cut = finalDot(atom)
   if cut >= 0:
     let unsuffixed = atom[0 .. cut]
     for i in 0 ..< modProcKeys.len:
-      if modProcKeys[i] == unsuffixed: return modProcVals[i]
+      if modProcOwn[i] == own and modProcKeys[i] == unsuffixed: return modProcVals[i]
     for i in 0 ..< modProcKeys.len:
-      if sameSymbolStem(atom, modProcKeys[i]): return modProcVals[i]
+      if modProcOwn[i] == own and sameSymbolStem(atom, modProcKeys[i]): return modProcVals[i]
   return nil
 
 proc modFindGlobal(atom: string): Node =
   for i in 0 ..< modGlobalKeys.len:
     if modGlobalKeys[i] == atom: return modGlobalVals[i]
+  let own = lastComponent(atom)   # a loose match may only land on a key read from the atom's own module
   let cut = finalDot(atom)
   if cut >= 0:
     let unsuffixed = atom[0 .. cut]
     for i in 0 ..< modGlobalKeys.len:
-      if modGlobalKeys[i] == unsuffixed: return modGlobalVals[i]
+      if modGlobalOwn[i] == own and modGlobalKeys[i] == unsuffixed: return modGlobalVals[i]
     for i in 0 ..< modGlobalKeys.len:
-      if sameSymbolStem(atom, modGlobalKeys[i]): return modGlobalVals[i]
+      if modGlobalOwn[i] == own and sameSymbolStem(atom, modGlobalKeys[i]): return modGlobalVals[i]
   return nil
 
 proc modFindType(atom: string): Node =
   for i in 0 ..< modTypeKeys.len:
     if modTypeKeys[i] == atom: return modTypeVals[i]
+  let own = lastComponent(atom)   # a loose match may only land on a key read from the atom's own module
   let cut = finalDot(atom)
   if cut >= 0:
     let unsuffixed = atom[0 .. cut]
     for i in 0 ..< modTypeKeys.len:
-      if modTypeKeys[i] == unsuffixed: return modTypeVals[i]
+      if modTypeOwn[i] == own and modTypeKeys[i] == unsuffixed: return modTypeVals[i]
     for i in 0 ..< modTypeKeys.len:
-      if sameSymbolStem(atom, modTypeKeys[i]): return modTypeVals[i]
+      if modTypeOwn[i] == own and sameSymbolStem(atom, modTypeKeys[i]): return modTypeVals[i]
   return nil
 
 # Recursively collect every atom in `n` that names a foreign-module symbol.
