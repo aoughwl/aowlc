@@ -198,6 +198,8 @@ class Emitter {
   constructor() {
     this.externOfSym = new Map();   // symbol name -> extern C name (importc/exportc)
     this.typeExtern = new Map();    // type symbol name -> extern C name
+    this.plainFields = new Set();   // field atoms of ordinary (declared) types: a name in BOTH sets is ambiguous -> mangled
+    this.rawFields = new Set();     // field atoms of importc/header types: spelled as the real C struct has them
     this.noDeclType = new Set();    // type symbols with importc/nodecl -> emit no decl
     this.sizedHeaders = new Set();  // `(header …)` of importc'd sized types (genSized)
     this.typeBody = new Map();      // type symbol name -> body node
@@ -325,6 +327,10 @@ class Emitter {
   }
 
   // --- expressions ----------------------------------------------------------
+  fieldName(atom) {
+    if (this.rawFields.has(atom) && !this.plainFields.has(atom)) { const k = atom.indexOf("."); return k < 0 ? atom : atom.slice(0, k); }
+    return mangleToC(atom);
+  }
   genExpr(e) {
     if (e.str !== undefined) return makeCString(e.str);
     if (e.chr !== undefined) return "(NC8)" + toCCharLit(e.chr);
@@ -385,7 +391,13 @@ class Emitter {
       case "paren": case "expr": return "(" + this.genExpr(e.kids[e.kids.length - 1]) + ")";
       case "addr": return "(&" + this.genExpr(e.kids[0]) + ")";
       case "deref": case "hderef": return "(*" + this.genExpr(e.kids[0]) + ")";
-      case "at": return this.genExpr(e.kids[0]) + ".a[" + this.genExpr(e.kids[1]) + "]";
+      case "at": {
+        const b = e.kids[0];
+        if (isList(b) && b.tag === "dot" && b.kids.length > 1 && isAtom(b.kids[1]) &&
+            this.rawFields.has(b.kids[1].atom) && !this.plainFields.has(b.kids[1].atom))
+          return this.genExpr(b) + "[" + this.genExpr(e.kids[1]) + "]";   // real C array field
+        return this.genExpr(e.kids[0]) + ".a[" + this.genExpr(e.kids[1]) + "]";
+      }
       case "pat": return this.genExpr(e.kids[0]) + "[" + this.genExpr(e.kids[1]) + "]";
       case "dot": {
         const obj = this.genExpr(e.kids[0]);
@@ -394,7 +406,7 @@ class Emitter {
         if (e.kids[2] && isAtom(e.kids[2]) && /^\d+$/.test(e.kids[2].atom)) {
           inh = ".Q".repeat(parseInt(e.kids[2].atom, 10));
         }
-        const fname = isAtom(fld) ? mangleToC(fld.atom) : this.genExpr(fld);
+        const fname = isAtom(fld) ? this.fieldName(fld.atom) : this.genExpr(fld);
         return obj + inh + "." + fname;
       }
       case "sizeof": return "sizeof(" + this.genType(e.kids[0]) + ")";
@@ -427,7 +439,7 @@ class Emitter {
     for (const kv of e.kids.slice(1)) {
       if (isList(kv) && kv.tag === "kv") {
         const fld = kv.kids[0];
-        const fname = isAtom(fld) ? mangleToC(fld.atom) : this.genExpr(fld);
+        const fname = isAtom(fld) ? this.fieldName(fld.atom) : this.genExpr(fld);
         // A `kv` may carry an inheritance level as a third kid (same convention
         // as `dot`): the field lives that many parents up, reached via `.Q`.
         let inh = "";
@@ -1026,8 +1038,38 @@ function buildExternMaps(em, procs, globals, types) {
     const pragmas = td.kids.find((k) => isList(k) && k.tag === "pragmas");
     const ext = em.externName(pragmas);
     if (ext) em.typeExtern.set(nameAtom.atom, ext);
-    if (em.hasPragma(pragmas, ["nodecl", "importc", "importcpp", "header"]))
+    if (em.hasPragma(pragmas, ["nodecl", "importc", "importcpp", "header"])) {
       em.noDeclType.add(nameAtom.atom);
+      // Fields of a header/importc'd type are the REAL C struct's (e.g. `struct stat`'s
+      // `st_dev`): record their raw spellings so `dot`/`kv` do not mangle them
+      // (mangleToC would turn `st_dev.0` into `stQ_dev_0`, a member that does not exist).
+      const body = td.kids[td.kids.length - 1];
+      if (isList(body) && (body.tag === "object" || body.tag === "union")) {
+        const stack = [body];
+        while (stack.length) {
+          const o = stack.pop();
+          for (const f of o.kids) {
+            if (!isList(f)) continue;
+            if (f.tag === "fld" && f.kids.length && isAtom(f.kids[0])) em.rawFields.add(f.kids[0].atom);
+            else if (f.tag === "union" || f.tag === "object") stack.push(f);
+          }
+        }
+      }
+    }
+    if (!em.noDeclType.has(nameAtom.atom)) {
+      const pb = td.kids[td.kids.length - 1];
+      if (isList(pb) && (pb.tag === "object" || pb.tag === "union")) {
+        const st = [pb];
+        while (st.length) {
+          const o = st.pop();
+          for (const f of o.kids) {
+            if (!isList(f)) continue;
+            if (f.tag === "fld" && f.kids.length && isAtom(f.kids[0])) em.plainFields.add(f.kids[0].atom);
+            else if (f.tag === "union" || f.tag === "object") st.push(f);
+          }
+        }
+      }
+    }
     em.typeBody.set(nameAtom.atom, td.kids[td.kids.length - 1]);
   }
 }

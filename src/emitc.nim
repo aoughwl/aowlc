@@ -908,6 +908,12 @@ proc genExpr(e: Node): string =
   elif t == "deref" or t == "hderef":
     return "(*" & genExpr(e.kids[0]) & ")"
   elif t == "at":
+    # A field of an importc/header struct (`struct dirent`'s `d_name`) is a REAL C
+    # array, not aowlc's `{ T a[N]; }` wrapper: index it bare.
+    let base = e.kids[0]
+    if isList(base) and base.tag == "dot" and base.kids.len > 1 and isAtom(base.kids[1]) and
+        mapHas(rawFields, base.kids[1].atom):
+      return genExpr(base) & "[" & genExpr(e.kids[1]) & "]"
     return genExpr(e.kids[0]) & ".a[" & genExpr(e.kids[1]) & "]"
   elif t == "pat":
     return genExpr(e.kids[0]) & "[" & genExpr(e.kids[1]) & "]"
