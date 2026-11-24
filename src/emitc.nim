@@ -1335,7 +1335,12 @@ proc genObjectFields(body: Node): string =
     if f.tag == "fld":
       let fn = f.kids[0]
       let ftype = f.kids[f.kids.len - 1]
-      fields.add declare(ftype, mangleToC(fn.atom)) & ";\n"
+      # `fieldName`, not `mangleToC`: a field atom is `name.<scope-index>`, so a user
+      # type's `fd.0` and a header struct's `fd.0` (`struct pollfd`) are the SAME string
+      # and `dot`/`kv` cannot tell which type they address. They spell it raw whenever
+      # the atom is a header struct's, so a declared field of that atom is spelled raw
+      # too: the declaration and every access then agree whichever type they belong to.
+      fields.add declare(ftype, fieldName(fn.atom)) & ";\n"
     elif f.tag == "union":
       fields.add "union {\n"
       for branch in f.kids:
