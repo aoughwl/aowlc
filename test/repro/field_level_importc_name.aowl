@@ -1,0 +1,13 @@
+import std/syncio
+type
+  DivT {.importc: "div_t", header: "<stdlib.h>".} = object
+    q {.importc: "quot".}: cint
+    rem: cint
+  Plain = object
+    q: int
+    quot: array[2, int]
+var d: DivT
+d.q = 3
+var p = Plain(q: 5)
+p.quot[1] = 7
+echo d.q, " ", p.q, " ", p.quot[1]

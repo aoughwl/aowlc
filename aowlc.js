@@ -200,6 +200,7 @@ class Emitter {
     this.typeExtern = new Map();    // type symbol name -> extern C name
     this.plainFields = new Set();   // field atoms of ordinary (declared) types: a name in BOTH sets is ambiguous -> mangled
     this.rawFields = new Set();     // field atoms of importc/header types: spelled as the real C struct has them
+    this.rawFieldC = new Map();     // raw field atom -> its field-level {.importc: "name".} C spelling
     this.varType = new Map();       // variable/param symbol -> declared type node (to find which TYPE a dot addresses)
     this.noDeclType = new Set();    // type symbols with importc/nodecl -> emit no decl
     this.sizedHeaders = new Set();  // `(header …)` of importc'd sized types (genSized)
@@ -338,6 +339,7 @@ class Emitter {
   }
   fieldName(atom, owner) {
     if (this.fieldRaw(atom, owner)) {
+      if (this.rawFieldC.has(atom)) return this.rawFieldC.get(atom);   // field-level {.importc: "x".}
       const k = atom.indexOf("."); return k < 0 ? atom : atom.slice(0, k);
     }
     return mangleToC(atom);
@@ -1114,6 +1116,11 @@ function buildExternMaps(em, procs, globals, types) {
             if (!isList(f)) continue;
             if (f.tag === "fld" && f.kids.length && isAtom(f.kids[0])) {
               em.rawFields.add(f.kids[0].atom);
+              // a field-level {.importc: "name".} is the C spelling of the member
+              if (f.kids.length > 2 && isList(f.kids[1]) && f.kids[1].tag === "pragmas") {
+                const cn = em.externName(f.kids[1]);
+                if (cn && !em.rawFieldC.has(f.kids[0].atom)) em.rawFieldC.set(f.kids[0].atom, cn);
+              }
             }
             else if (f.tag === "union" || f.tag === "object") stack.push(f);
           }

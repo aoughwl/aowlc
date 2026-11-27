@@ -437,6 +437,9 @@ var rawFields: seq[string] = @[]
 # Field atoms are `name.<scope-index>` with NO owner: two types' same-named fields are the
 # same string (see `fieldRaw`).
 var plainFieldAtoms: seq[string] = @[]   # field atoms of ordinary (declared) object types
+# A raw field's field-level `{.importc: "name".}` spelling (`kind {.importc: "type".}`).
+var rawFieldCKeys: seq[string] = @[]
+var rawFieldCVals: seq[string] = @[]
 # Declared type of every variable/param/field seen in this module, to find which TYPE a
 # `dot` addresses (the field atom alone cannot say: see `fieldRaw`).
 var varTypeKeys: seq[string] = @[]
@@ -498,6 +501,8 @@ proc resetEmitter() =
   typeDeclVals = @[]
   rawFields = @[]
   plainFieldAtoms = @[]
+  rawFieldCKeys = @[]
+  rawFieldCVals = @[]
   varTypeKeys = @[]
   varTypeVals = @[]
   ownMod = prog.main.name
@@ -548,9 +553,11 @@ proc symName(name: string): string =
   return mangleToC(name)
 
 proc rawFieldSpelling(name: string): string =
-  ## How a field of an importc/header struct is spelled in C: the field name as written. A field atom
+  ## How a field of an importc/header struct is spelled in C: its field-level
+  ## `{.importc: "x".}` name when it has one, else the field name as written. A field atom
   ## carries the trailing `.<scope-index>` every symbol does (`tv_sec.0`), which
   ## `mangleToC` would turn into `tvQ_sec_0`; the real struct has only `tv_sec`.
+  if mapHas(rawFieldCKeys, name): return mapGet(rawFieldCKeys, rawFieldCVals, name)
   return beforeDot(name)
 
 proc typeOwner(t: Node; depth = 0): string =
@@ -1629,6 +1636,12 @@ proc buildExternMaps(procs, globals, types: seq[Node]) =
           inc i
           if isList(f) and f.tag == "fld" and f.kids.len > 0 and isAtom(f.kids[0]):
             if not mapHas(rawFields, f.kids[0].atom): rawFields.add f.kids[0].atom
+            # a field-level `{.importc: "name".}` is the C spelling of the member
+            if f.kids.len > 2 and isList(f.kids[1]) and f.kids[1].tag == "pragmas":
+              let cn = externName(f.kids[1])
+              if cn.len > 0 and not mapHas(rawFieldCKeys, f.kids[0].atom):
+                rawFieldCKeys.add f.kids[0].atom
+                rawFieldCVals.add cn
 
 proc notePlainFields(types: seq[Node]) =
   ## Field atoms of ordinary (declared, non-importc) object types, for `fieldRaw`.
