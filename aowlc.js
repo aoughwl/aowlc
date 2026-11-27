@@ -749,6 +749,10 @@ class Emitter {
     return { name, sig: prefix + retC + " " + name + "(" + (args.join(", ") || "void") + ")" };
   }
   genProc(p) {
+    // local names (`x.1`, the hexer's `ii.5` temporaries) repeat across procs with different
+    // types: exprOwner sees the globals plus THIS proc's own declarations
+    this.varType = new Map(this.varTypeG || []);
+    this.noteVarTypes(p);
     const { body } = this.procParts(p);
     const { sig } = this.procSignature(p);
     if (!body) return sig + ";";               // prototype only (imported/no body)
@@ -1418,8 +1422,8 @@ function emitUnit(parts, opts = {}) {
   const extGlobals = parts.externGlobals || [];
   const extProcs0 = parts.externProcs || [];
   buildExternMaps(em, procs.concat(extProcs0), globals.concat(extGlobals), types);
-  for (const p of procs) em.noteVarTypes(p);
   for (const g of globals.concat(extGlobals)) em.noteVarTypes(g);
+  em.varTypeG = new Map(em.varType);
 
   const definedSyms = new Set();
   const procByName = new Map();
@@ -1575,8 +1579,8 @@ function compileHarness(snif, entry, argExprs = []) {
   const { procs, globals, types } = classify(nodes);
   const em = new Emitter();
   buildExternMaps(em, procs, globals, types);
-  for (const p of procs) em.noteVarTypes(p);
   for (const g of globals) em.noteVarTypes(g);
+  em.varTypeG = new Map(em.varType);
 
   const procByName = new Map();
   for (const p of procs) procByName.set(em.procParts(p).nameAtom.atom, p);

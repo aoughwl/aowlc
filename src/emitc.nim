@@ -444,6 +444,7 @@ var rawFieldCVals: seq[string] = @[]
 # `dot` addresses (the field atom alone cannot say: see `fieldRaw`).
 var varTypeKeys: seq[string] = @[]
 var varTypeVals: seq[Node] = @[]
+var varTypeGlobalN = 0   # entries [0, varTypeGlobalN) are globals; the rest belong to the proc being emitted
 
 # cross-module resolution state: sibling `.c.nif` modules loaded on demand so we
 # can emit correct `extern` prototypes / type declarations for foreign symbols.
@@ -505,6 +506,7 @@ proc resetEmitter() =
   rawFieldCVals = @[]
   varTypeKeys = @[]
   varTypeVals = @[]
+  varTypeGlobalN = 0
   ownMod = prog.main.name
   loadedMods = @[]
   siblingSuffixes = @[]
@@ -1310,6 +1312,12 @@ proc genRpcStub(pp: ProcParts; cname: string): string =
     result.add "  return __r;"
 
 proc genProc(p: Node): string =
+  # Local names (`x.1`, the hexer's `ii.5` temporaries) repeat across procs with different
+  # types: the types `exprOwner` sees are the globals plus THIS proc's own declarations.
+  while varTypeKeys.len > varTypeGlobalN:
+    discard varTypeKeys.pop()
+    discard varTypeVals.pop()
+  noteVarTypes(p)
   let pp = procParts(p)
   let sig = procSignature(p)
   if pp.body == nil: return sig & ";"
@@ -2144,8 +2152,8 @@ proc emitUnit(parts: Classified): string =
 
   buildExternMaps(procs, globals, types)
   notePlainFields(types)
-  for p in procs: noteVarTypes(p)
   for g in globals: noteVarTypes(g)
+  varTypeGlobalN = varTypeKeys.len
 
   # WHOSE MODULE IS THIS? `resetEmitter` seeds `ownMod` from `prog.main.name`,
   # which is the PROGRAM's main module — correct only when the process emits that
@@ -2231,6 +2239,7 @@ proc emitUnit(parts: Classified): string =
   buildExternMaps(foreignProcs, foreignGlobals, foreignTypes)
   notePlainFields(foreignTypes)
   for g in foreignGlobals: noteVarTypes(g)
+  varTypeGlobalN = varTypeKeys.len
 
   # all types needing a declaration in this TU: foreign first (deps), then local.
   var allTypes: seq[Node] = @[]

@@ -1,0 +1,31 @@
+# JESTER bug 18: the hexer's loop temporaries (`ii.N`) repeat across procs with different
+# types; the importc struct field must stay raw in BOTH procs even though an ordinary
+# aowl type (Pending) has fields of the same names.
+import std/syncio
+type
+  DivT {.importc: "div_t", header: "<stdlib.h>".} = object
+    quot: cint
+    rem: cint
+  LDivT {.importc: "ldiv_t", header: "<stdlib.h>".} = object
+    quot: clong
+    rem: clong
+  Pending = object
+    quot: int
+    rem: int
+    tag: string
+proc a(xs: seq[Pending]): int =
+  result = 0
+  for p in xs:
+    var d = default(DivT)
+    d.quot = cint(p.quot)
+    d.rem = cint(p.rem)
+    result += int(d.quot) + int(d.rem)
+proc b(xs: seq[Pending]): int =
+  result = 0
+  for p in xs:
+    var d = default(LDivT)
+    d.quot = clong(p.quot)
+    d.rem = clong(p.rem)
+    result += int(d.quot) * 10 + int(d.rem)
+let xs = @[Pending(quot: 1, rem: 2, tag: "x"), Pending(quot: 3, rem: 4, tag: "y")]
+echo a(xs), " ", b(xs)
