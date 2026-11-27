@@ -369,18 +369,52 @@ class Emitter {
     if (body.kids.length && isAtom(body.kids[0]) && !isDot(body.kids[0])) return this.fieldTypeOf(body.kids[0].atom, fieldAtom, depth + 1);
     return null;
   }
-  exprOwner(e, depth = 0) {
-    if (!e || depth > 8) return "";
-    if (isAtom(e)) return isDot(e) ? "" : this.typeOwner(this.varType.get(e.atom));
+  declBody(typeAtom) { return this.typeBody.get(typeAtom) || null; }
+  // Follow a named type through aliases to an array/ptr/flexarray shape (an object/union/enum stays
+  // a name: its atom is the owner).
+  unwrapType(t, depth = 0) {
+    if (!t || depth > 8) return t;
+    if (isAtom(t) && !isDot(t)) {
+      const body = this.declBody(t.atom);
+      if (body && isList(body) && ["array", "flexarray", "ptr", "aptr", "ref", "mut"].includes(body.tag)) return this.unwrapType(body, depth + 1);
+      if (body && isAtom(body) && !isDot(body)) return this.unwrapType(body, depth + 1);
+    }
+    return t;
+  }
+  // Element type of an indexable type: array[N, T], UncheckedArray[T], seq data, and ptr/aptr to any of those.
+  elemTypeOf(t) {
+    const u = this.unwrapType(t);
+    if (!u || !isList(u) || !u.kids.length) return null;
+    if (u.tag === "array" || u.tag === "flexarray") return u.kids[0];
+    if (["ptr", "aptr", "ref", "mut"].includes(u.tag)) {
+      const pointee = u.kids[u.kids.length - 1];
+      const up = this.unwrapType(pointee);
+      if (up && isList(up) && (up.tag === "array" || up.tag === "flexarray") && up.kids.length) return up.kids[0];
+      return pointee;
+    }
+    return null;
+  }
+  // Best-effort declared type of expression `e`; null when it cannot tell.
+  exprType(e, depth = 0) {
+    if (!e || depth > 8) return null;
+    if (isAtom(e)) return isDot(e) ? null : (this.varType.get(e.atom) || null);
     if (isList(e) && e.kids.length) {
       if (e.tag === "dot" && e.kids.length > 1 && isAtom(e.kids[1])) {
-        const o = this.exprOwner(e.kids[0], depth + 1);
-        return o ? this.typeOwner(this.fieldTypeOf(o, e.kids[1].atom)) : "";
+        const o = this.typeOwner(this.exprType(e.kids[0], depth + 1));
+        return o ? this.fieldTypeOf(o, e.kids[1].atom) : null;
       }
-      if (["deref", "hderef", "conv", "hconv", "cast"].includes(e.tag)) return this.exprOwner(e.kids[e.kids.length - 1], depth + 1);
+      if (e.tag === "deref" || e.tag === "hderef") {
+        const u = this.unwrapType(this.exprType(e.kids[0], depth + 1));
+        if (u && isList(u) && ["ptr", "aptr", "ref", "mut"].includes(u.tag) && u.kids.length) return u.kids[u.kids.length - 1];
+        return null;
+      }
+      if ((e.tag === "at" || e.tag === "pat") && e.kids.length > 1) return this.elemTypeOf(this.exprType(e.kids[0], depth + 1));
+      if (["conv", "hconv", "cast"].includes(e.tag)) return e.kids[0];   // the target type
+      if (["paren", "expr"].includes(e.tag)) return this.exprType(e.kids[e.kids.length - 1], depth + 1);
     }
-    return "";
+    return null;
   }
+  exprOwner(e) { return this.typeOwner(this.exprType(e)); }
   noteVarTypes(n) {
     if (!isList(n)) return;
     if (n.kids.length > 2 && isAtom(n.kids[0]) &&

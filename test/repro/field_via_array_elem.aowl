@@ -1,0 +1,13 @@
+import std/syncio
+type
+  DivT {.importc: "div_t", header: "<stdlib.h>".} = object
+    quot, rem: cint
+  Mine = object
+    quot: int          # an aowl type with the same field name
+proc go(): int =
+  var ds = default(array[2, DivT])
+  ds[0].quot = 3
+  ds[1].quot = 4
+  result = int(ds[0].quot + ds[1].quot)
+let m = Mine(quot: 1)
+echo go() + m.quot

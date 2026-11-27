@@ -1,0 +1,41 @@
+# JESTER bug 18b: a field reached through an ELEMENT (array / seq / ptr / UncheckedArray /
+# a field that is an array / deref then index) of an importc struct must stay raw although an
+# ordinary aowl type has a field of the same name.
+import std/syncio
+type
+  DivT {.importc: "div_t", header: "<stdlib.h>".} = object
+    quot, rem: cint
+  Mine = object
+    quot: int
+  Holder = object
+    items: array[2, DivT]
+    n: int
+proc viaArray(): int =
+  var ds = default(array[2, DivT])
+  ds[0].quot = 3
+  ds[1].quot = 4
+  result = int(ds[0].quot + ds[1].quot)
+proc viaSeq(): int =
+  var ds = newSeq[DivT](2)
+  ds[0].quot = 5
+  ds[1].quot = 6
+  result = int(ds[0].quot + ds[1].quot)
+proc viaPtr(p: ptr DivT): int =
+  p.quot = 7
+  result = int(p.quot)
+proc viaUnchecked(p: ptr UncheckedArray[DivT]): int =
+  p[0].quot = 8
+  p[1].quot = 9
+  result = int(p[0].quot + p[1].quot)
+proc viaField(): int =
+  var h = Holder(n: 1)
+  h.items[1].quot = 10
+  result = int(h.items[1].quot) + h.n
+proc viaDerefIndex(): int =
+  var ds = default(array[2, DivT])
+  let p = addr ds
+  p[][1].quot = 11
+  result = int(ds[1].quot)
+let m = Mine(quot: 1)
+var arr = default(array[2, DivT])
+echo viaArray() + m.quot, " ", viaSeq(), " ", viaPtr(addr arr[0]), " ", viaUnchecked(cast[ptr UncheckedArray[DivT]](addr arr[0])), " ", viaField(), " ", viaDerefIndex()

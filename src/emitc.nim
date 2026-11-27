@@ -594,23 +594,66 @@ proc fieldTypeOf(typeAtom: string; fieldAtom: string; depth = 0): Node =
     return nil
   return nil
 
-proc exprOwner(e: Node; depth = 0): string =
-  ## Best-effort: the named object type the expression `e` denotes (a variable, parameter,
-  ## field of one, or a deref of one); "" when it cannot tell.
-  if e == nil or depth > 8: return ""
+proc declBody(typeAtom: string): Node =
+  ## The body of the declared type `typeAtom`, or nil.
+  for i in 0 ..< typeDeclKeys.len:
+    if typeDeclKeys[i] == typeAtom:
+      let td = typeDeclVals[i]
+      return td.kids[td.kids.len - 1]
+  return nil
+
+proc unwrapType(t: Node; depth = 0): Node =
+  ## Follow a named type through aliases to an array/ptr/uarray shape (an object/union/enum
+  ## stays a name: its atom is the owner).
+  if t == nil or depth > 8: return t
+  if isAtom(t) and not isDot(t):
+    let body = declBody(t.atom)
+    if body != nil and isList(body) and oneOf(body.tag, ["array", "flexarray", "ptr", "aptr", "ref", "mut"]):
+      return unwrapType(body, depth + 1)
+    if body != nil and isAtom(body) and not isDot(body): return unwrapType(body, depth + 1)
+  return t
+
+proc elemTypeOf(t: Node): Node =
+  ## The element type of an indexable type: array[N, T], UncheckedArray[T], seq data, and
+  ## ptr/aptr to any of those. nil when unknown.
+  let u = unwrapType(t)
+  if u == nil or not isList(u) or u.kids.len == 0: return nil
+  if oneOf(u.tag, ["array", "flexarray"]): return u.kids[0]
+  if oneOf(u.tag, ["ptr", "aptr", "ref", "mut"]):
+    let pointee = u.kids[u.kids.len - 1]
+    let up = unwrapType(pointee)
+    if up != nil and isList(up) and oneOf(up.tag, ["array", "flexarray"]) and up.kids.len > 0: return up.kids[0]
+    return pointee
+  return nil
+
+proc exprType(e: Node; depth = 0): Node =
+  ## Best-effort declared type of the expression `e`; nil when it cannot tell.
+  if e == nil or depth > 8: return nil
   if isAtom(e):
-    if isDot(e): return ""
+    if isDot(e): return nil
     for i in 0 ..< varTypeKeys.len:
-      if varTypeKeys[i] == e.atom: return typeOwner(varTypeVals[i])
-    return ""
+      if varTypeKeys[i] == e.atom: return varTypeVals[i]
+    return nil
   if isList(e) and e.kids.len > 0:
     if e.tag == "dot" and e.kids.len > 1 and isAtom(e.kids[1]):
-      let o = exprOwner(e.kids[0], depth + 1)
-      if o.len == 0: return ""
-      return typeOwner(fieldTypeOf(o, e.kids[1].atom))
-    if oneOf(e.tag, ["deref", "hderef", "conv", "hconv", "cast"]):
-      return exprOwner(e.kids[e.kids.len - 1], depth + 1)
-  return ""
+      let o = typeOwner(exprType(e.kids[0], depth + 1))
+      if o.len == 0: return nil
+      return fieldTypeOf(o, e.kids[1].atom)
+    if e.tag == "deref" or e.tag == "hderef":
+      let u = unwrapType(exprType(e.kids[0], depth + 1))
+      if u != nil and isList(u) and oneOf(u.tag, ["ptr", "aptr", "ref", "mut"]) and u.kids.len > 0:
+        return u.kids[u.kids.len - 1]
+      return nil
+    if (e.tag == "at" or e.tag == "pat") and e.kids.len > 1:
+      return elemTypeOf(exprType(e.kids[0], depth + 1))
+    if oneOf(e.tag, ["conv", "hconv", "cast"]): return e.kids[0]   # the target type
+    if oneOf(e.tag, ["paren", "expr"]):
+      return exprType(e.kids[e.kids.len - 1], depth + 1)
+  return nil
+
+proc exprOwner(e: Node): string =
+  ## The named object type the expression `e` denotes ("" when unknown).
+  return typeOwner(exprType(e))
 
 proc noteVarTypes(n: Node) =
   if n == nil or not isList(n): return
