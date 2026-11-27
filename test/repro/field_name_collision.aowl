@@ -1,0 +1,14 @@
+import std/syncio
+type
+  Tm {.importc: "struct tm", header: "<time.h>".} = object
+    tm_sec: cint          # a raw C struct with a field...
+  Sdlish {.importc: "div_t", header: "<stdlib.h>".} = object
+    quot: cint            # ...named like one of ours below
+  Lane = object
+    quot: array[4, bool]  # same name as the raw C field, but an aowl array
+    other: int
+var l = Lane(other: 1)
+l.quot[2] = true
+var d: Sdlish
+d.quot = 3
+echo l.quot[2], " ", d.quot

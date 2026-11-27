@@ -200,6 +200,7 @@ class Emitter {
     this.typeExtern = new Map();    // type symbol name -> extern C name
     this.plainFields = new Set();   // field atoms of ordinary (declared) types: a name in BOTH sets is ambiguous -> mangled
     this.rawFields = new Set();     // field atoms of importc/header types: spelled as the real C struct has them
+    this.varType = new Map();       // variable/param symbol -> declared type node (to find which TYPE a dot addresses)
     this.noDeclType = new Set();    // type symbols with importc/nodecl -> emit no decl
     this.sizedHeaders = new Set();  // `(header …)` of importc'd sized types (genSized)
     this.typeBody = new Map();      // type symbol name -> body node
@@ -327,9 +328,70 @@ class Emitter {
   }
 
   // --- expressions ----------------------------------------------------------
-  fieldName(atom) {
-    if (this.rawFields.has(atom) && !this.plainFields.has(atom)) { const k = atom.indexOf("."); return k < 0 ? atom : atom.slice(0, k); }
+  // A field atom is `name.<scope-index>` with NO owner: two types' same-named fields are the
+  // SAME string. So ask the owning type when it is known (typeOwner/exprOwner); when it is not,
+  // a raw atom that no ordinary type also uses is raw (a name in both stays mangled).
+  fieldRaw(atom, owner) {
+    if (!this.rawFields.has(atom)) return false;
+    if (owner) return this.noDeclType.has(owner);
+    return !this.plainFields.has(atom);
+  }
+  fieldName(atom, owner) {
+    if (this.fieldRaw(atom, owner)) {
+      const k = atom.indexOf("."); return k < 0 ? atom : atom.slice(0, k);
+    }
     return mangleToC(atom);
+  }
+  typeOwner(t, depth = 0) {
+    if (!t || depth > 8) return "";
+    if (isAtom(t)) return isDot(t) ? "" : t.atom;
+    if (isList(t) && t.kids.length && ["ptr", "ref", "mut", "out", "lent", "sink", "var", "aptr"].includes(t.tag))
+      return this.typeOwner(t.kids[t.kids.length - 1], depth + 1);
+    return "";
+  }
+  fieldTypeOf(typeAtom, fieldAtom, depth = 0) {
+    if (depth > 8) return null;
+    const body = this.typeBody.get(typeAtom);
+    if (!body) return null;
+    if (isAtom(body) && !isDot(body)) return this.fieldTypeOf(body.atom, fieldAtom, depth + 1);   // alias
+    if (!isList(body) || !["object", "union"].includes(body.tag)) return null;
+    const stack = [body];
+    while (stack.length) {
+      const o = stack.pop();
+      for (const f of o.kids) {
+        if (!isList(f)) continue;
+        if (f.tag === "fld" && f.kids.length && isAtom(f.kids[0]) && f.kids[0].atom === fieldAtom) return f.kids[f.kids.length - 1];
+        if (f.tag === "union" || f.tag === "object") stack.push(f);
+      }
+    }
+    if (body.kids.length && isAtom(body.kids[0]) && !isDot(body.kids[0])) return this.fieldTypeOf(body.kids[0].atom, fieldAtom, depth + 1);
+    return null;
+  }
+  exprOwner(e, depth = 0) {
+    if (!e || depth > 8) return "";
+    if (isAtom(e)) return isDot(e) ? "" : this.typeOwner(this.varType.get(e.atom));
+    if (isList(e) && e.kids.length) {
+      if (e.tag === "dot" && e.kids.length > 1 && isAtom(e.kids[1])) {
+        const o = this.exprOwner(e.kids[0], depth + 1);
+        return o ? this.typeOwner(this.fieldTypeOf(o, e.kids[1].atom)) : "";
+      }
+      if (["deref", "hderef", "conv", "hconv", "cast"].includes(e.tag)) return this.exprOwner(e.kids[e.kids.length - 1], depth + 1);
+    }
+    return "";
+  }
+  noteVarTypes(n) {
+    if (!isList(n)) return;
+    if (n.kids.length > 2 && isAtom(n.kids[0]) &&
+        ["var", "let", "gvar", "tvar", "glet", "gcursor", "cursor", "const", "param"].includes(n.tag)) {
+      let ty = n.kids[2];
+      if (n.tag === "param" && !isList(ty) && n.kids.length > 3) ty = n.kids[3];
+      // local names (`x.1`) repeat across procs: a name declared with two different types is
+      // unknown (null), never guessed
+      const k = n.kids[0].atom;
+      if (!this.varType.has(k)) this.varType.set(k, ty);
+      else if (this.typeOwner(this.varType.get(k)) !== this.typeOwner(ty)) this.varType.set(k, null);
+    }
+    for (const k of n.kids) this.noteVarTypes(k);
   }
   genExpr(e) {
     if (e.str !== undefined) return makeCString(e.str);
@@ -394,7 +456,7 @@ class Emitter {
       case "at": {
         const b = e.kids[0];
         if (isList(b) && b.tag === "dot" && b.kids.length > 1 && isAtom(b.kids[1]) &&
-            this.rawFields.has(b.kids[1].atom) && !this.plainFields.has(b.kids[1].atom))
+            this.fieldRaw(b.kids[1].atom, this.exprOwner(b.kids[0])))
           return this.genExpr(b) + "[" + this.genExpr(e.kids[1]) + "]";   // real C array field
         return this.genExpr(e.kids[0]) + ".a[" + this.genExpr(e.kids[1]) + "]";
       }
@@ -406,7 +468,7 @@ class Emitter {
         if (e.kids[2] && isAtom(e.kids[2]) && /^\d+$/.test(e.kids[2].atom)) {
           inh = ".Q".repeat(parseInt(e.kids[2].atom, 10));
         }
-        const fname = isAtom(fld) ? this.fieldName(fld.atom) : this.genExpr(fld);
+        const fname = isAtom(fld) ? this.fieldName(fld.atom, this.exprOwner(e.kids[0])) : this.genExpr(fld);
         return obj + inh + "." + fname;
       }
       case "sizeof": return "sizeof(" + this.genType(e.kids[0]) + ")";
@@ -439,7 +501,7 @@ class Emitter {
     for (const kv of e.kids.slice(1)) {
       if (isList(kv) && kv.tag === "kv") {
         const fld = kv.kids[0];
-        const fname = isAtom(fld) ? this.fieldName(fld.atom) : this.genExpr(fld);
+        const fname = isAtom(fld) ? this.fieldName(fld.atom, this.typeOwner(e.kids[0])) : this.genExpr(fld);
         // A `kv` may carry an inheritance level as a third kid (same convention
         // as `dot`): the field lives that many parents up, reached via `.Q`.
         let inh = "";
@@ -1050,7 +1112,9 @@ function buildExternMaps(em, procs, globals, types) {
           const o = stack.pop();
           for (const f of o.kids) {
             if (!isList(f)) continue;
-            if (f.tag === "fld" && f.kids.length && isAtom(f.kids[0])) em.rawFields.add(f.kids[0].atom);
+            if (f.tag === "fld" && f.kids.length && isAtom(f.kids[0])) {
+              em.rawFields.add(f.kids[0].atom);
+            }
             else if (f.tag === "union" || f.tag === "object") stack.push(f);
           }
         }
@@ -1347,6 +1411,8 @@ function emitUnit(parts, opts = {}) {
   const extGlobals = parts.externGlobals || [];
   const extProcs0 = parts.externProcs || [];
   buildExternMaps(em, procs.concat(extProcs0), globals.concat(extGlobals), types);
+  for (const p of procs) em.noteVarTypes(p);
+  for (const g of globals.concat(extGlobals)) em.noteVarTypes(g);
 
   const definedSyms = new Set();
   const procByName = new Map();
@@ -1502,6 +1568,8 @@ function compileHarness(snif, entry, argExprs = []) {
   const { procs, globals, types } = classify(nodes);
   const em = new Emitter();
   buildExternMaps(em, procs, globals, types);
+  for (const p of procs) em.noteVarTypes(p);
+  for (const g of globals) em.noteVarTypes(g);
 
   const procByName = new Map();
   for (const p of procs) procByName.set(em.procParts(p).nameAtom.atom, p);

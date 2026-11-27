@@ -434,6 +434,13 @@ var typeDeclVals: seq[Node] = @[]
 # Raw (unmangled) field names belonging to an importc/header type - see the
 # `rawFields` note in `buildExternMaps`.
 var rawFields: seq[string] = @[]
+# Field atoms are `name.<scope-index>` with NO owner: two types' same-named fields are the
+# same string (see `fieldRaw`).
+var plainFieldAtoms: seq[string] = @[]   # field atoms of ordinary (declared) object types
+# Declared type of every variable/param/field seen in this module, to find which TYPE a
+# `dot` addresses (the field atom alone cannot say: see `fieldRaw`).
+var varTypeKeys: seq[string] = @[]
+var varTypeVals: seq[Node] = @[]
 
 # cross-module resolution state: sibling `.c.nif` modules loaded on demand so we
 # can emit correct `extern` prototypes / type declarations for foreign symbols.
@@ -490,6 +497,9 @@ proc resetEmitter() =
   typeDeclKeys = @[]
   typeDeclVals = @[]
   rawFields = @[]
+  plainFieldAtoms = @[]
+  varTypeKeys = @[]
+  varTypeVals = @[]
   ownMod = prog.main.name
   loadedMods = @[]
   siblingSuffixes = @[]
@@ -537,18 +547,94 @@ proc symName(name: string): string =
   if mapHas(externKeys, name): return mapGet(externKeys, externVals, name)
   return mangleToC(name)
 
-proc fieldName(name: string): string =
-  ## Like `mangleToC`, but leaves a field of an importc/header type (see
-  ## `rawFields`) exactly as written: it must match the real C struct.
-  ##
-  ## A field atom carries the same trailing `.<scope-index>` every symbol
-  ## does (`tv_sec.0`), which `mangleToC` turns into part of the mangled name
-  ## (`.` -> `_`, giving `tvQ_sec_0`). A raw/importc'd field must come out
-  ## exactly as the real C struct spells it, so strip that suffix (via
-  ## `beforeDot`, already used the same way for procs) instead of mangling
-  ## it. Leaving it on produced `ts_1.tv_sec_0`, and `struct timespec` (from
-  ## `<time.h>`) has no member by that name - only `tv_sec`.
-  if mapHas(rawFields, name): return beforeDot(name)
+proc rawFieldSpelling(name: string): string =
+  ## How a field of an importc/header struct is spelled in C: the field name as written. A field atom
+  ## carries the trailing `.<scope-index>` every symbol does (`tv_sec.0`), which
+  ## `mangleToC` would turn into `tvQ_sec_0`; the real struct has only `tv_sec`.
+  return beforeDot(name)
+
+proc typeOwner(t: Node; depth = 0): string =
+  ## The named type a value of type `t` is (through ptr/ref/mut/...); "" when unknown.
+  if t == nil or depth > 8: return ""
+  if isAtom(t):
+    if isDot(t): return ""
+    return t.atom
+  if isList(t) and t.kids.len > 0 and oneOf(t.tag, ["ptr", "ref", "mut", "out", "lent", "sink", "var", "aptr"]):
+    return typeOwner(t.kids[t.kids.len - 1], depth + 1)
+  return ""
+
+proc fieldTypeOf(typeAtom: string; fieldAtom: string; depth = 0): Node =
+  ## The declared type of `fieldAtom` in the object type `typeAtom` (parents searched), or nil.
+  if depth > 8: return nil
+  for i in 0 ..< typeDeclKeys.len:
+    if typeDeclKeys[i] != typeAtom: continue
+    let td = typeDeclVals[i]
+    let body = td.kids[td.kids.len - 1]
+    if isAtom(body) and not isDot(body): return fieldTypeOf(body.atom, fieldAtom, depth + 1)   # alias
+    if not isList(body) or not oneOf(body.tag, ["object", "union"]): return nil
+    var stack: seq[Node] = @[body]
+    while stack.len > 0:
+      let o = stack.pop()
+      for f in o.kids:
+        if not isList(f): continue
+        if f.tag == "fld" and f.kids.len > 0 and isAtom(f.kids[0]) and f.kids[0].atom == fieldAtom:
+          return f.kids[f.kids.len - 1]
+        if f.tag == "union" or f.tag == "object": stack.add f
+    if body.kids.len > 0 and isAtom(body.kids[0]) and not isDot(body.kids[0]):
+      return fieldTypeOf(body.kids[0].atom, fieldAtom, depth + 1)
+    return nil
+  return nil
+
+proc exprOwner(e: Node; depth = 0): string =
+  ## Best-effort: the named object type the expression `e` denotes (a variable, parameter,
+  ## field of one, or a deref of one); "" when it cannot tell.
+  if e == nil or depth > 8: return ""
+  if isAtom(e):
+    if isDot(e): return ""
+    for i in 0 ..< varTypeKeys.len:
+      if varTypeKeys[i] == e.atom: return typeOwner(varTypeVals[i])
+    return ""
+  if isList(e) and e.kids.len > 0:
+    if e.tag == "dot" and e.kids.len > 1 and isAtom(e.kids[1]):
+      let o = exprOwner(e.kids[0], depth + 1)
+      if o.len == 0: return ""
+      return typeOwner(fieldTypeOf(o, e.kids[1].atom))
+    if oneOf(e.tag, ["deref", "hderef", "conv", "hconv", "cast"]):
+      return exprOwner(e.kids[e.kids.len - 1], depth + 1)
+  return ""
+
+proc noteVarTypes(n: Node) =
+  if n == nil or not isList(n): return
+  if n.kids.len > 2 and isAtom(n.kids[0]) and
+      oneOf(n.tag, ["var", "let", "gvar", "tvar", "glet", "gcursor", "cursor", "const", "param"]):
+    # (var :x pragmas type value) / (param :x pragmas type): the type is the 3rd kid; a
+    # param in the c.nif carries it last when the pragma slot is elided
+    var ty = n.kids[2]
+    if n.tag == "param" and not isList(ty) and n.kids.len > 3: ty = n.kids[3]
+    # local names (`x.1`) repeat across procs: a name declared with two different types is
+    # unknown (nil), never guessed
+    var found = false
+    for vi in 0 ..< varTypeKeys.len:
+      if varTypeKeys[vi] == n.kids[0].atom:
+        found = true
+        if typeOwner(varTypeVals[vi]) != typeOwner(ty): varTypeVals[vi] = nil
+        break
+    if not found:
+      varTypeKeys.add n.kids[0].atom
+      varTypeVals.add ty
+  for k in n.kids: noteVarTypes(k)
+
+proc fieldRaw(fieldAtom: string; owner: string): bool =
+  ## Is the field `fieldAtom` of the type `owner` spelled raw (a field of an importc/header
+  ## struct)? A field atom is `name.<scope-index>` with no owner, so two types' same-named
+  ## fields are the SAME string: ask the owning type when it is known; when it is not, a
+  ## raw atom that no ordinary type also uses is raw (a name in both stays mangled).
+  if not mapHas(rawFields, fieldAtom): return false
+  if owner.len > 0: return mapHas(noDeclTypes, owner)
+  return not mapHas(plainFieldAtoms, fieldAtom)
+
+proc fieldName(name: string; owner: string = ""): string =
+  if fieldRaw(name, owner): return rawFieldSpelling(name)
   return mangleToC(name)
 
 proc typeName(name: string): string =
@@ -771,7 +857,7 @@ proc constrBody(e: Node): string =
     let kv = e.kids[i]
     if isList(kv) and kv.tag == "kv":
       let fld = kv.kids[0]
-      let fname = if isAtom(fld): fieldName(fld.atom) else: genExpr(fld)
+      let fname = if isAtom(fld): fieldName(fld.atom, typeOwner(e.kids[0])) else: genExpr(fld)
       var inh = ""
       if kv.kids.len > 2 and isAtom(kv.kids[2]) and isIntLit(kv.kids[2].atom):
         inh = myRepeat(".Q", parseI64(kv.kids[2].atom).int)
@@ -912,7 +998,7 @@ proc genExpr(e: Node): string =
     # array, not aowlc's `{ T a[N]; }` wrapper: index it bare.
     let base = e.kids[0]
     if isList(base) and base.tag == "dot" and base.kids.len > 1 and isAtom(base.kids[1]) and
-        mapHas(rawFields, base.kids[1].atom):
+        fieldRaw(base.kids[1].atom, exprOwner(base.kids[0])):
       return genExpr(base) & "[" & genExpr(e.kids[1]) & "]"
     return genExpr(e.kids[0]) & ".a[" & genExpr(e.kids[1]) & "]"
   elif t == "pat":
@@ -923,7 +1009,7 @@ proc genExpr(e: Node): string =
     var inh = ""
     if e.kids.len > 2 and isAtom(e.kids[2]) and isIntLit(e.kids[2].atom):
       inh = myRepeat(".Q", parseI64(e.kids[2].atom).int)
-    let fname = if isAtom(fld): fieldName(fld.atom) else: genExpr(fld)
+    let fname = if isAtom(fld): fieldName(fld.atom, exprOwner(e.kids[0])) else: genExpr(fld)
     return obj & inh & "." & fname
   elif t == "sizeof":
     return "sizeof(" & genType(e.kids[0]) & ")"
@@ -1340,7 +1426,7 @@ proc genObjectFields(body: Node): string =
       # and `dot`/`kv` cannot tell which type they address. They spell it raw whenever
       # the atom is a header struct's, so a declared field of that atom is spelled raw
       # too: the declaration and every access then agree whichever type they belong to.
-      fields.add declare(ftype, fieldName(fn.atom)) & ";\n"
+      fields.add declare(ftype, mangleToC(fn.atom)) & ";\n"
     elif f.tag == "union":
       fields.add "union {\n"
       for branch in f.kids:
@@ -1543,6 +1629,21 @@ proc buildExternMaps(procs, globals, types: seq[Node]) =
           inc i
           if isList(f) and f.tag == "fld" and f.kids.len > 0 and isAtom(f.kids[0]):
             if not mapHas(rawFields, f.kids[0].atom): rawFields.add f.kids[0].atom
+
+proc notePlainFields(types: seq[Node]) =
+  ## Field atoms of ordinary (declared, non-importc) object types, for `fieldRaw`.
+  for td in types:
+    if not isAtom(td.kids[0]) or mapHas(noDeclTypes, td.kids[0].atom): continue
+    let body = td.kids[td.kids.len - 1]
+    if not isList(body) or not oneOf(body.tag, ["object", "union"]): continue
+    var stack: seq[Node] = @[body]
+    while stack.len > 0:
+      let o = stack.pop()
+      for f in o.kids:
+        if not isList(f): continue
+        if f.tag == "fld" and f.kids.len > 0 and isAtom(f.kids[0]):
+          if not mapHas(plainFieldAtoms, f.kids[0].atom): plainFieldAtoms.add f.kids[0].atom
+        elif f.tag == "union" or f.tag == "object": stack.add f
 
 proc collectCalls(node: Node; outp: var seq[string]) =
   if node == nil: return
@@ -2029,6 +2130,9 @@ proc emitUnit(parts: Classified): string =
   let topStmts = parts.topStmts
 
   buildExternMaps(procs, globals, types)
+  notePlainFields(types)
+  for p in procs: noteVarTypes(p)
+  for g in globals: noteVarTypes(g)
 
   # WHOSE MODULE IS THIS? `resetEmitter` seeds `ownMod` from `prog.main.name`,
   # which is the PROGRAM's main module — correct only when the process emits that
@@ -2112,6 +2216,8 @@ proc emitUnit(parts: Classified): string =
 
   # foreign importc names must be registered too, so typeName/symName map right.
   buildExternMaps(foreignProcs, foreignGlobals, foreignTypes)
+  notePlainFields(foreignTypes)
+  for g in foreignGlobals: noteVarTypes(g)
 
   # all types needing a declaration in this TU: foreign first (deps), then local.
   var allTypes: seq[Node] = @[]
